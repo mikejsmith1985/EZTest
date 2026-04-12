@@ -8,11 +8,13 @@
  *   eztest generate  — Analyze source code and generate Playwright tests
  *   eztest record    — Start a Smart Session Recording with annotation overlay
  *   eztest replay    — Run the autonomous reproduce → fix → validate loop from a bug report
+ *   eztest ui        — Launch the browser-based wizard (no terminal knowledge required)
  */
 import { Command } from 'commander';
 import { registerGenerateCommand } from './commands/generate.js';
 import { registerRecordCommand } from './commands/record.js';
 import { registerReplayCommand } from './commands/replay.js';
+import { registerUiCommand } from './commands/ui.js';
 
 const EZTEST_VERSION = '0.1.0';
 
@@ -31,6 +33,7 @@ cliProgram
 registerGenerateCommand(cliProgram);
 registerRecordCommand(cliProgram);
 registerReplayCommand(cliProgram);
+registerUiCommand(cliProgram);
 
 // Handle unrecognized commands gracefully
 cliProgram.on('command:*', () => {
