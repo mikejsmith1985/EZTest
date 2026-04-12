@@ -888,7 +888,7 @@ export function buildWizardPageHtml(): string {
 
       openConfigOverlay(
         'Start Recording a Session',
-        'Enter your app\'s URL. EZTest will open it in a browser where you can click around and flag anything that looks wrong.',
+        "Enter your app's URL. EZTest will open it in a browser where you can click around and flag anything that looks wrong.",
         function(container) {
           container.innerHTML =
             '<div class="config-input-row">'
