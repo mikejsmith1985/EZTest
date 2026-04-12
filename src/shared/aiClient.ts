@@ -6,8 +6,34 @@
  */
 import type { AiMessage, AiResponse } from './types.js';
 import type { AiConfig } from './config.js';
-import { getDefaultModelForProvider } from './config.js';
+import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION } from './config.js';
 import { logDebug, logWarning } from './logger.js';
+
+// ── Quota Exhaustion Error ─────────────────────────────────────────────────
+
+/**
+ * Thrown by executeWithRetry when an AI model's daily free-tier quota is exhausted.
+ * AiClient.chat() catches this error internally and rotates to the next model in
+ * the rotation list — callers only see this if ALL models are exhausted.
+ */
+export class ModelQuotaExhaustedError extends Error {
+  /** The model name whose daily quota was exhausted. */
+  public readonly exhaustedModelName: string;
+  /** Approximate seconds until this model's quota resets (from the retry-after header). */
+  public readonly secondsUntilReset: number;
+
+  constructor(exhaustedModelName: string, secondsUntilReset: number) {
+    const resetHours = Math.round(secondsUntilReset / 3600);
+    const resetMinutes = Math.round((secondsUntilReset % 3600) / 60);
+    super(
+      `Model "${exhaustedModelName}" daily quota exhausted. ` +
+      `Resets in approximately ${resetHours}h ${resetMinutes}m.`,
+    );
+    this.name = 'ModelQuotaExhaustedError';
+    this.exhaustedModelName = exhaustedModelName;
+    this.secondsUntilReset = secondsUntilReset;
+  }
+}
 
 // ── Provider Client Interfaces ─────────────────────────────────────────────
 
@@ -209,13 +235,36 @@ function extractRetryAfterDelayMs(error: unknown): number | null {
     if (delayMs > MAX_RETRYABLE_DELAY_MS) {
       logWarning(
         `API quota exhausted — retry-after is ${Math.round(retryAfterSeconds / 3600)}h ${Math.round((retryAfterSeconds % 3600) / 60)}m. ` +
-        `Daily limit reached. Switch to a different AI provider or wait for the quota to reset.`
+        `Daily limit reached. EZTest will automatically try the next available model in the free-tier rotation.`
       );
       return null;
     }
     return delayMs;
   }
   return null;
+}
+
+/**
+ * Extracts the raw retry-after value in seconds from an API error.
+ * Unlike extractRetryAfterDelayMs, this never filters out large values — it is
+ * used to populate ModelQuotaExhaustedError with the actual reset time so the UI
+ * can display a human-readable countdown to the user.
+ */
+function extractRetryAfterSeconds(error: unknown): number {
+  if (typeof error !== 'object' || error === null) return 0;
+  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
+  if (!errorWithHeaders.headers) return 0;
+
+  let retryAfterValue: string | null | undefined;
+  if (errorWithHeaders.headers instanceof Headers) {
+    retryAfterValue = errorWithHeaders.headers.get('retry-after');
+  } else {
+    retryAfterValue = (errorWithHeaders.headers as Record<string, string>)['retry-after'];
+  }
+
+  if (!retryAfterValue) return 0;
+  const retryAfterSeconds = parseFloat(retryAfterValue);
+  return isNaN(retryAfterSeconds) ? 0 : Math.max(0, retryAfterSeconds);
 }
 
 /**
@@ -243,6 +292,7 @@ async function executeWithRetry<ReturnType>(
   operation: () => Promise<ReturnType>,
   maxRetryAttempts: number,
   operationDescription: string,
+  currentModelName: string,
 ): Promise<ReturnType> {
   let lastError: unknown;
 
@@ -252,7 +302,7 @@ async function executeWithRetry<ReturnType>(
     } catch (callError) {
       lastError = callError;
 
-      if (attemptIndex < maxRetryAttempts && isTransientApiError(callError)) {
+      if (isTransientApiError(callError)) {
         // Prefer the server-specified retry-after delay over our own backoff.
         // The GitHub Models API sends a retry-after header that tells us exactly
         // how long its rate-limit window is (often 15-60 seconds). Ignoring it
@@ -260,28 +310,61 @@ async function executeWithRetry<ReturnType>(
         const retryAfterDelayMs = extractRetryAfterDelayMs(callError);
 
         // extractRetryAfterDelayMs returns null for quota-exhaustion delays (> 5 min).
-        // When a long retry-after is detected, the warning is already logged; we stop
-        // retrying immediately because no amount of waiting will help until the daily
-        // quota resets (~23 hours on GitHub Models free tier).
+        // This check runs before the retry guard so quota is always detected even when
+        // maxRetryAttempts = 0. Throw so AiClient can rotate to the next free-tier model.
         if (retryAfterDelayMs === null && hasRetryAfterHeader(callError)) {
-          break;
+          throw new ModelQuotaExhaustedError(currentModelName, extractRetryAfterSeconds(callError));
         }
 
-        const backoffDelayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attemptIndex);
-        const waitDelayMs = retryAfterDelayMs ?? backoffDelayMs;
-
-        logWarning(
-          `AI call failed (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1}) for "${operationDescription}". ` +
-          `Retrying in ${Math.round(waitDelayMs / 1000)}s${retryAfterDelayMs ? ' (retry-after)' : ''}...`,
-        );
-        await new Promise(resolve => setTimeout(resolve, waitDelayMs));
-      } else {
-        break;
+        if (attemptIndex < maxRetryAttempts) {
+          const backoffDelayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attemptIndex);
+          const waitDelayMs = retryAfterDelayMs ?? backoffDelayMs;
+          logWarning(
+            `AI call failed (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1}) for "${operationDescription}". ` +
+            `Retrying in ${Math.round(waitDelayMs / 1000)}s${retryAfterDelayMs ? ' (retry-after)' : ''}...`,
+          );
+          await new Promise(resolve => setTimeout(resolve, waitDelayMs));
+          continue;
+        }
       }
+
+      break;
     }
   }
 
   throw lastError;
+}
+
+// ── Model Rotation Builder ─────────────────────────────────────────────────
+
+/**
+ * Builds the ordered model rotation list for an AiConfig.
+ * For GitHub provider: returns the full free-tier rotation (18 models by default),
+ * sliced to start at the configured model if one was specified.
+ * For other providers: single-element list (no rotation needed).
+ */
+function buildModelRotationList(aiConfig: AiConfig): readonly string[] {
+  if (aiConfig.provider !== 'github') {
+    // Non-GitHub providers use a single configured or default model
+    const singleModelName = aiConfig.modelOverride ?? getDefaultModelForProvider(aiConfig.provider);
+    return [singleModelName];
+  }
+
+  const configuredModel = aiConfig.modelOverride;
+  if (!configuredModel) {
+    return GITHUB_FREE_MODEL_ROTATION;
+  }
+
+  // If a model override was specified, start the rotation at its position so
+  // exhaustion falls through to models that follow it in the priority order.
+  const configuredModelPosition = GITHUB_FREE_MODEL_ROTATION.indexOf(configuredModel);
+  if (configuredModelPosition >= 0) {
+    return GITHUB_FREE_MODEL_ROTATION.slice(configuredModelPosition);
+  }
+
+  // Custom model not in the standard rotation list — put it first so EZTest
+  // honours the user's preference, then falls through to the full rotation list.
+  return [configuredModel, ...GITHUB_FREE_MODEL_ROTATION];
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -289,15 +372,21 @@ async function executeWithRetry<ReturnType>(
 /**
  * The EZTest AI client. Holds a configured provider adapter and exposes a
  * single `chat()` method that all modules use for AI calls.
+ * For GitHub Models provider, automatically rotates through 18+ free-tier
+ * models when the active model's daily quota is exhausted.
  */
 export class AiClient {
   private readonly aiConfig: AiConfig;
-  private readonly resolvedModelName: string;
+  /** Ordered list of model IDs to try. GitHub uses the full free-tier rotation. */
+  private readonly modelRotationList: readonly string[];
+  /** Index into modelRotationList pointing at the currently active model. */
+  private activeModelIndex: number;
   private providerAdapter: ProviderAdapter | null = null;
 
   constructor(aiConfig: AiConfig) {
     this.aiConfig = aiConfig;
-    this.resolvedModelName = aiConfig.modelOverride ?? getDefaultModelForProvider(aiConfig.provider);
+    this.activeModelIndex = 0;
+    this.modelRotationList = buildModelRotationList(aiConfig);
   }
 
   /**
@@ -324,28 +413,67 @@ export class AiClient {
       this.providerAdapter = await createAnthropicAdapter(this.aiConfig.apiKey);
     }
 
-    logDebug(`AI client initialized: provider=${this.aiConfig.provider}, model=${this.resolvedModelName}`);
+    logDebug(
+      `AI client initialized: provider=${this.aiConfig.provider}, ` +
+      `model=${this.modelName}, rotation_size=${this.modelRotationList.length}`,
+    );
   }
 
   /**
    * Sends a conversation to the AI and returns the response.
-   * Retries automatically on transient failures.
+   * Retries on transient failures. For GitHub provider, automatically rotates
+   * to the next free-tier model when the active model's daily quota is exhausted.
    */
   async chat(messages: AiMessage[], operationDescription: string): Promise<AiResponse> {
     if (!this.providerAdapter) {
       throw new Error('AiClient.initialize() must be called before chat()');
     }
 
-    return executeWithRetry(
-      () => this.providerAdapter!.sendMessages(messages, this.resolvedModelName, this.aiConfig.maxTokensPerCall),
-      this.aiConfig.maxRetryAttempts,
-      operationDescription,
-    );
+    // Iterate through models until one succeeds or all are exhausted.
+    // Non-quota errors always propagate immediately without trying other models.
+    while (this.activeModelIndex < this.modelRotationList.length) {
+      const currentModel = this.modelRotationList[this.activeModelIndex];
+
+      try {
+        return await executeWithRetry(
+          () => this.providerAdapter!.sendMessages(messages, currentModel, this.aiConfig.maxTokensPerCall),
+          this.aiConfig.maxRetryAttempts,
+          operationDescription,
+          currentModel,
+        );
+      } catch (callError) {
+        if (!(callError instanceof ModelQuotaExhaustedError)) {
+          throw callError; // Non-quota errors always propagate immediately
+        }
+
+        const nextModelIndex = this.activeModelIndex + 1;
+        if (nextModelIndex >= this.modelRotationList.length) {
+          throw new Error(
+            `All ${this.modelRotationList.length} models in the GitHub Models free-tier rotation ` +
+            `have exhausted their daily quota. ` +
+            `Please wait for quotas to reset (usually at midnight UTC) ` +
+            `or configure a different AI provider in your .env file.`,
+          );
+        }
+
+        const nextModelName = this.modelRotationList[nextModelIndex];
+        logWarning(
+          `Model "${currentModel}" daily quota exhausted. ` +
+          `Auto-rotating to "${nextModelName}" ` +
+          `(${nextModelIndex + 1}/${this.modelRotationList.length} in rotation).`,
+        );
+        this.activeModelIndex = nextModelIndex;
+      }
+    }
+
+    // Unreachable — the while-loop always returns or throws before this point.
+    // TypeScript requires an explicit return/throw after the loop.
+    throw new Error('Model rotation exhausted all available models unexpectedly');
   }
 
-  /** Returns the model name being used for logging and reporting purposes. */
+  /** Returns the currently active model name, for logging and reporting purposes. */
   get modelName(): string {
-    return this.resolvedModelName;
+    return this.modelRotationList[this.activeModelIndex];
   }
 
   /** Returns the provider name being used. */
