@@ -26,7 +26,7 @@ const traverseAst = ((babelTraverse as any).default ?? babelTraverse) as (
   visitors: Record<string, (path: NodePath<any>) => void>,
 ) => void;
 import type { ComponentAnalysis, InteractiveElement, InteractiveElementKind } from '../shared/types.js';
-import { logDebug, logWarning } from '../shared/logger.js';
+import { logDebug, logInfo, logWarning } from '../shared/logger.js';
 
 // ── Element Detection Constants ────────────────────────────────────────────
 
@@ -249,38 +249,16 @@ function inferComponentNameFromFilePath(filePath: string, sourceDirectory: strin
 // ── File Parsing ───────────────────────────────────────────────────────────
 
 /**
- * Parses a single source file and returns its ComponentAnalysis.
- * Returns null if the file cannot be parsed or contains no interactive elements.
+ * Traverses the AST of a parsed file and collects all interactive JSX elements
+ * and PascalCase import names. Extracted into its own function to keep
+ * parseSourceFile under the 40-line limit and make each concern independently testable.
  */
-function parseSourceFile(
-  filePath: string,
-  sourceDirectory: string,
-): ComponentAnalysis | null {
-  const sourceCode = readFileSync(filePath, 'utf-8');
-  const fileExtension = extname(filePath).toLowerCase();
-
-  // Determine parser plugins based on file type
-  const parserPlugins: babelParser.ParserPlugin[] = ['jsx'];
-  if (fileExtension === '.ts' || fileExtension === '.tsx') {
-    parserPlugins.push('typescript');
-  }
-
-  let astRoot: babelTypes.File;
-  try {
-    astRoot = babelParser.parse(sourceCode, {
-      sourceType: 'module',
-      plugins: parserPlugins,
-      errorRecovery: true, // Parse as much as possible even with minor syntax issues
-    });
-  } catch (parseError) {
-    logWarning(`Could not parse ${filePath}: ${String(parseError)}`);
-    return null;
-  }
-
+function extractInteractiveElementsAndImports(
+  astRoot: babelTypes.File,
+): { discoveredElements: InteractiveElement[]; importedComponents: string[] } {
   const discoveredElements: InteractiveElement[] = [];
   const importedComponents: string[] = [];
 
-  // Walk the AST to find interactive elements and imports
   traverseAst(astRoot, {
     JSXElement(nodePath: NodePath<babelTypes.JSXElement>) {
       const openingElement = nodePath.node.openingElement;
@@ -308,6 +286,45 @@ function parseSourceFile(
     },
   });
 
+  return { discoveredElements, importedComponents };
+}
+
+/**
+ * Parses a single source file and returns its ComponentAnalysis.
+ * Returns null if the file is unreadable, cannot be parsed, or contains no interactive elements.
+ *
+ * readFileSync is intentionally inside the try/catch so that permission errors,
+ * locked files, and overly-long paths all produce a warning and graceful null return
+ * instead of crashing the entire analysis run.
+ */
+function parseSourceFile(
+  filePath: string,
+  sourceDirectory: string,
+): ComponentAnalysis | null {
+  const fileExtension = extname(filePath).toLowerCase();
+  const parserPlugins: babelParser.ParserPlugin[] = ['jsx'];
+  if (fileExtension === '.ts' || fileExtension === '.tsx') {
+    parserPlugins.push('typescript');
+  }
+
+  let sourceCode: string;
+  let astRoot: babelTypes.File;
+  try {
+    // Both readFileSync and parse are inside the try/catch — any unreadable or
+    // syntactically broken file produces a warning rather than crashing the run.
+    sourceCode = readFileSync(filePath, 'utf-8');
+    astRoot = babelParser.parse(sourceCode, {
+      sourceType: 'module',
+      plugins: parserPlugins,
+      errorRecovery: true, // Parse as much as possible even with minor syntax issues
+    });
+  } catch (parseError) {
+    logWarning(`Could not parse ${filePath}: ${String(parseError)}`);
+    return null;
+  }
+
+  const { discoveredElements, importedComponents } = extractInteractiveElementsAndImports(astRoot);
+
   if (discoveredElements.length === 0) {
     logDebug(`No interactive elements found in ${filePath}, skipping`);
     return null;
@@ -331,7 +348,125 @@ function parseSourceFile(
 const PARSEABLE_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 
 /**
- * Discovers all parseable source files in a directory, respecting exclude patterns.
+ * Extra glob ignore patterns always applied during file discovery — regardless of caller config.
+ * Catches generated artifacts (Storybook stories, declaration stubs, minified bundles, build
+ * output, mock fixtures) that never contain user-facing UI flows worth testing.
+ */
+const ADDITIONAL_EXCLUDE_PATTERNS: string[] = [
+  '**/*.stories.*',
+  '**/*.story.*',
+  '**/*.d.ts',
+  '**/*.min.js',
+  '**/.next/**',
+  '**/build/**',
+  '**/out/**',
+  '**/vendor/**',
+  '**/.turbo/**',
+  '**/coverage/**',
+  '**/__mocks__/**',
+  '**/__fixtures__/**',
+  '**/fixtures/**',
+  '**/mocks/**',
+  '**/migrations/**',
+  '**/storybook-static/**',
+];
+
+// ── Priority Scoring Constants ─────────────────────────────────────────────
+
+/**
+ * Directory names that strongly indicate user-facing UI flows.
+ * A file nested inside any of these directories gets the highest priority score.
+ */
+const HIGH_VALUE_DIRECTORY_NAMES = new Set(['pages', 'routes', 'views', 'screens', 'app']);
+
+/**
+ * Exact component file names (without extension) that are almost always
+ * entry points or top-level navigation components worth testing first.
+ */
+const EXACT_HIGH_VALUE_COMPONENT_NAMES = new Set([
+  'App', 'Router', 'Navigation', 'NavBar', 'Navbar', 'Sidebar',
+  'Layout', 'Header', 'Footer', 'Home', 'Dashboard',
+  'Login', 'Register', 'Signup', 'Checkout', 'Cart',
+]);
+
+/** Filename suffixes that indicate a full-page or screen-level component. */
+const PAGE_LEVEL_SUFFIXES = ['Page', 'Screen', 'View', 'Route'] as const;
+
+/** Filename suffixes that indicate a focused form or overlay — still high value. */
+const FORM_LEVEL_SUFFIXES = ['Form', 'Modal', 'Dialog', 'Wizard', 'Drawer'] as const;
+
+/** Score assigned when the file lives in a high-value directory (pages, routes, etc.). */
+const SCORE_TIER_HIGH_VALUE_DIRECTORY = 100;
+/** Score assigned when the filename exactly matches a known entry-point component. */
+const SCORE_TIER_EXACT_COMPONENT_NAME = 90;
+/** Score assigned when the filename ends with a page-level suffix. */
+const SCORE_TIER_PAGE_LEVEL_SUFFIX = 70;
+/** Score assigned when the filename ends with a form/overlay suffix. */
+const SCORE_TIER_FORM_LEVEL_SUFFIX = 50;
+/** Score assigned to shallow files (≤ 3 levels deep from source directory). */
+const SCORE_TIER_SHALLOW_DEPTH = 30;
+/** Fallback score for all other files. */
+const SCORE_TIER_DEFAULT = 10;
+
+/** Maximum path depth (in segments from the source directory) to qualify for the shallow score tier. */
+const MAX_SHALLOW_PATH_DEPTH = 3;
+
+// ── Priority Scoring Helpers ───────────────────────────────────────────────
+
+/**
+ * Returns the number of path segments between the source directory and the file.
+ * Used as a tiebreaker within the same priority score tier: shallower files first.
+ *
+ * Example: sourceDir/components/Button.tsx → depth 2
+ */
+function calculatePathDepth(filePath: string, sourceDirectory: string): number {
+  const relativeFilePath = relative(sourceDirectory, filePath);
+  return relativeFilePath.split(/[/\\]/).length;
+}
+
+/**
+ * Scores a source file by how likely it is to contain a user-facing UI flow.
+ * Higher scores mean the file should be analyzed before lower-scoring files.
+ *
+ * This function drives the priority sort in analyzeSourceDirectory so that
+ * when maxFileCount forces us to truncate, we keep the most valuable files.
+ */
+function scoreFileByImportance(filePath: string, sourceDirectory: string): number {
+  const relativeFilePath = relative(sourceDirectory, filePath);
+  const pathSegments = relativeFilePath.split(/[/\\]/);
+
+  // Strip the filename from the path to get only directory segments
+  const directorySegments = pathSegments.slice(0, -1);
+  const fileNameWithExtension = pathSegments[pathSegments.length - 1] ?? '';
+  const fileBaseName = basename(fileNameWithExtension, extname(fileNameWithExtension));
+
+  // Rule 1: File lives inside a high-value directory at any depth
+  const isInHighValueDirectory = directorySegments.some(
+    segment => HIGH_VALUE_DIRECTORY_NAMES.has(segment),
+  );
+  if (isInHighValueDirectory) return SCORE_TIER_HIGH_VALUE_DIRECTORY;
+
+  // Rule 2: Filename exactly matches a known top-level component name
+  if (EXACT_HIGH_VALUE_COMPONENT_NAMES.has(fileBaseName)) return SCORE_TIER_EXACT_COMPONENT_NAME;
+
+  // Rule 3: Filename ends with a page-level suffix (UserProfilePage, CheckoutScreen, etc.)
+  const hasPageLevelSuffix = PAGE_LEVEL_SUFFIXES.some(suffix => fileBaseName.endsWith(suffix));
+  if (hasPageLevelSuffix) return SCORE_TIER_PAGE_LEVEL_SUFFIX;
+
+  // Rule 4: Filename ends with a form/overlay suffix (LoginForm, ConfirmModal, etc.)
+  const hasFormLevelSuffix = FORM_LEVEL_SUFFIXES.some(suffix => fileBaseName.endsWith(suffix));
+  if (hasFormLevelSuffix) return SCORE_TIER_FORM_LEVEL_SUFFIX;
+
+  // Rule 5: Shallow file — within 3 levels of the source root, likely a top-level component
+  if (pathSegments.length <= MAX_SHALLOW_PATH_DEPTH) return SCORE_TIER_SHALLOW_DEPTH;
+
+  return SCORE_TIER_DEFAULT;
+}
+
+/**
+ * Discovers all parseable source files in a directory, applying both the caller-supplied
+ * exclude patterns and the built-in ADDITIONAL_EXCLUDE_PATTERNS that filter out
+ * generated artifacts (stories, type stubs, build output) regardless of project config.
  */
 async function discoverSourceFiles(
   sourceDirectory: string,
@@ -340,8 +475,12 @@ async function discoverSourceFiles(
   // glob requires forward slashes even on Windows — normalize backslashes to forward slashes
   const normalizedSourceDirectory = sourceDirectory.replace(/\\/g, '/');
   const globPattern = `${normalizedSourceDirectory}/**/*{${PARSEABLE_EXTENSIONS.join(',')}}`;
+
+  // Always exclude the additional patterns on top of whatever the caller provides
+  const allExcludePatterns = [...excludePatterns, ...ADDITIONAL_EXCLUDE_PATTERNS];
+
   const discoveredFiles = await glob(globPattern, {
-    ignore: excludePatterns,
+    ignore: allExcludePatterns,
     absolute: true,
   });
 
@@ -363,6 +502,10 @@ export interface CodeAnalyzerOptions {
  * Analyzes an entire source directory and returns a ComponentAnalysis for each
  * file that contains interactive UI elements.
  *
+ * Files are sorted by UI importance score before applying the maxFileCount limit,
+ * so when the project exceeds the limit we always analyze the most valuable files first
+ * (pages, routes, high-value component names) rather than arbitrary filesystem order.
+ *
  * This is the entry point for Phase 1 of the EZTest synthesis pipeline.
  * The returned analyses are passed to the FlowMapper and then the TestGenerator.
  */
@@ -373,23 +516,31 @@ export async function analyzeSourceDirectory(
   const resolvedSourceDirectory = resolve(sourceDirectory);
 
   const sourceFiles = await discoverSourceFiles(resolvedSourceDirectory, excludePatterns);
-  const filesToAnalyze = sourceFiles.slice(0, maxFileCount);
+
+  // Sort by descending importance score so that if we must truncate we keep the
+  // files most likely to contain user-facing flows. Depth is the tiebreaker:
+  // within the same score tier, shallower files come first.
+  const prioritizedFiles = [...sourceFiles]
+    .sort((fileA, fileB) => {
+      const scoreA = scoreFileByImportance(fileA, resolvedSourceDirectory);
+      const scoreB = scoreFileByImportance(fileB, resolvedSourceDirectory);
+      if (scoreA !== scoreB) return scoreB - scoreA;
+      return calculatePathDepth(fileA, resolvedSourceDirectory) - calculatePathDepth(fileB, resolvedSourceDirectory);
+    })
+    .slice(0, maxFileCount);
 
   if (sourceFiles.length > maxFileCount) {
-    logWarning(
-      `Found ${sourceFiles.length} source files but maxFileCount is ${maxFileCount}. ` +
-      `Analyzing first ${maxFileCount} files. Increase maxComponentCount in your config to analyze more.`
+    logInfo(
+      `Found ${sourceFiles.length} source files — prioritized top ${maxFileCount} files by UI importance.`,
     );
   }
 
   const componentAnalyses: ComponentAnalysis[] = [];
 
-  for (const filePath of filesToAnalyze) {
+  for (const filePath of prioritizedFiles) {
     logDebug(`Analyzing: ${relative(resolvedSourceDirectory, filePath)}`);
     const analysis = parseSourceFile(filePath, resolvedSourceDirectory);
-    if (analysis) {
-      componentAnalyses.push(analysis);
-    }
+    if (analysis) componentAnalyses.push(analysis);
   }
 
   logDebug(`Completed analysis: ${componentAnalyses.length} components with interactive elements`);

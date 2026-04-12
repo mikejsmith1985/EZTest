@@ -9,8 +9,9 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { analyzeSourceDirectory } from '../../src/synthesizer/codeAnalyzer.js';
 
-/** Base directory for all test fixture files. */
-const FIXTURE_BASE_DIRECTORY = resolve('./tests/fixtures/code-analyzer-temp');
+// Base directory for all test fixture files — kept outside of any path named 'fixtures' to avoid
+// matching the built-in glob exclude pattern for fixture directories in discoverSourceFiles.
+const FIXTURE_BASE_DIRECTORY = resolve('./tests/temp/code-analyzer');
 
 /**
  * Creates a unique temp directory for a single test to prevent parallel test workers

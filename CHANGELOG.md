@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Smart priority-based file selection in `analyzeSourceDirectory`** — files are now scored and sorted by UI importance before the `maxFileCount` limit is applied, so the most valuable files (pages, routes, dashboards, login screens, forms) are always analyzed first instead of relying on arbitrary filesystem order.
+  - New `scoreFileByImportance` function assigns scores 100–10 based on directory name (`pages`, `routes`, `views`, `screens`, `app`), exact component name (`Login`, `Dashboard`, `Cart`, etc.), filename suffix (`Page`, `Screen`, `Form`, `Modal`), and path depth.
+  - New `calculatePathDepth` helper breaks ties within the same score tier by preferring shallower files.
+- **Extended glob exclude patterns** in `discoverSourceFiles` — Storybook stories, TypeScript declaration stubs, minified bundles, build output directories (`.next`, `build`, `out`, `vendor`, `.turbo`), and mock/fixture directories are now always excluded regardless of project config.
+- **Extended `globalExcludePatterns` in `config.ts`** — same additional patterns are also part of the default config so CLI users benefit without any manual configuration.
+
+### Changed
+- **`DEFAULT_MAX_COMPONENT_COUNT`** raised from 50 → 400 in `generate.ts` to support large codebases now that priority scoring ensures only the most important files fill the budget.
+- **`maxFileCount`** raised from 50 → 200 in `testPlanner.ts` for the same reason.
+- **Truncation log message** changed from a `logWarning` ("Analyzing first N files") to a `logInfo` ("prioritized top N files by UI importance") — it is informational, not an error condition.
+
 ### Fixed
+- **`parseSourceFile` crash on unreadable files** — `readFileSync` was outside the try/catch block, so permission errors, locked files, or overly-long paths on Windows would throw all the way to the caller and abort the entire analysis run. It is now inside the try/catch and produces a graceful warning instead.
+
+
 - **Blank page on launch** — unescaped apostrophe in handleRecord's description string (pp's) caused a JavaScript syntax error that silently crashed the entire script block before the page could render; fixed by changing the string delimiter to double quotes
 - **GitHub Copilot not detected in UI** — dotenv was installed but never called, so .env was never loaded and process.env.EZTEST_GITHUB_TOKEN was always undefined; added import 'dotenv/config' as the very first import in src/cli/index.ts so every module sees the correct environment values on startup
 

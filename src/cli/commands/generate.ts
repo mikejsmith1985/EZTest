@@ -31,8 +31,8 @@ import {
 } from '../../synthesizer/feedbackStore.js';
 import { buildFeedbackContextSection } from '../../synthesizer/promptTemplates.js';
 
-/** Maximum components to analyze per run — prevents runaway API costs. */
-const DEFAULT_MAX_COMPONENT_COUNT = 50;
+/** Maximum components to analyze per run — high enough for large codebases while still bounding API costs. */
+const DEFAULT_MAX_COMPONENT_COUNT = 400;
 
 /**
  * Registers the `generate` subcommand on the given Commander program instance.
