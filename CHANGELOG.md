@@ -8,7 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Automatic free-tier model rotation in `aiClient.ts`** — when a GitHub Models model exhausts its daily quota, EZTest automatically rotates to the next model in the `GITHUB_FREE_MODEL_ROTATION` list instead of failing. Test generation continues uninterrupted across up to 19 different free-tier models (OpenAI gpt-4.1/4o/mini/nano, Meta Llama 4 Scout/Maverick/3.3-70B/405B, DeepSeek-V3, Mistral Medium/Small/Codestral, AI21 Jamba, Cohere, Phi-4, and gpt-5-mini for Copilot Pro users).
+- **Dynamic token-aware batch splitting in `flowMapper.ts`** — `splitIntoDynamicBatches()` replaces the old fixed-size batch splitter. Each batch is sized based on the estimated number of output tokens the AI will produce, keeping every API call under 90% of the 4096-token Copilot Pro output cap. A form with 10 inputs is automatically given its own batch; a row of simple icon buttons can share a batch with several neighbors.
+- **`estimateComponentOutputTokens()` helper** — estimates how many output tokens a component will need based on its interactive element count: `max(1, ceil(elements/2)) × 3 variants × 220 tokens/variant`. Both functions are exported and unit-tested.
+- **Per-batch token budget logging** — each batch now logs its component count and estimated output tokens so users can see exactly why components were grouped the way they were.
+- **10 new unit tests in `flowMapper.spec.ts`** covering `estimateComponentOutputTokens` (0, 1, 3 elements; proportional growth) and `splitIntoDynamicBatches` (single batch fits, multi-batch splits, oversized solo, empty input, order preserved, no batch exceeds budget).
+
+### Changed
+- **`FLOW_MAPPING_BATCH_SIZE` constant removed** — replaced by `TARGET_BATCH_OUTPUT_TOKENS = 3600`, `BATCH_RESPONSE_OVERHEAD_TOKENS = 200`, and `ESTIMATED_TOKENS_PER_FLOW_VARIANT = 220`.
+
+— when a GitHub Models model exhausts its daily quota, EZTest automatically rotates to the next model in the `GITHUB_FREE_MODEL_ROTATION` list instead of failing. Test generation continues uninterrupted across up to 19 different free-tier models (OpenAI gpt-4.1/4o/mini/nano, Meta Llama 4 Scout/Maverick/3.3-70B/405B, DeepSeek-V3, Mistral Medium/Small/Codestral, AI21 Jamba, Cohere, Phi-4, and gpt-5-mini for Copilot Pro users).
 - **`GITHUB_FREE_MODEL_ROTATION` constant in `config.ts`** — ordered list of all non-premium GitHub Models model IDs, arranged by quality tier (HIGH 50/day before LOW 150/day) with clear comments explaining the reasoning for each model's position.
 - **`ModelQuotaExhaustedError` class in `aiClient.ts`** — exported error type thrown by `executeWithRetry` when quota exhaustion is detected. Carries `exhaustedModelName` and `secondsUntilReset` for precise UI messaging. `AiClient.chat()` catches this internally; callers only see it if all 19 models are exhausted.
 - **`extractRetryAfterSeconds()` helper** — extracts the raw seconds value from the retry-after header without filtering, enabling `ModelQuotaExhaustedError` to show users an accurate reset countdown.

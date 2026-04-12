@@ -18,37 +18,79 @@ import {
 } from './promptTemplates.js';
 import { logDebug, logWarning } from '../shared/logger.js';
 
-// ── Batching Constants ─────────────────────────────────────────────────────
+// ── Dynamic Batch Sizing ───────────────────────────────────────────────────
 
 /**
- * Maximum number of components to include in a single flow-generation API call.
- *
- * Token budget breakdown:
- *   - ~150 tokens: compact system prompt
- *   - ~500 tokens: app spec section
- *   - ~55 tokens per component: name + element list (source omitted to save tokens)
- *   - 15 components × 55 = 825 input tokens — total input ~1475 tokens ✅
- *   - Output: 15 components × 3 flows × 4 steps × ~12 tokens/step ≈ 2160 tokens ✅
- *
- * This fits comfortably within the 4096-token output cap (Copilot Pro limit).
- * The previous value of 40 caused gpt-4.1 to generate ~4400 output tokens for
- * 26-component projects, truncating the JSON mid-array and losing all flows.
- *
- * For most projects (< 30 UI components), this means 2 API calls max — still fast.
+ * Target output token budget per batch — 90% of the Copilot Pro 4096-token output cap.
+ * Leaving a 10% margin accounts for variation in AI response verbosity.
+ * This is the output cap — it applies regardless of which model is active.
  */
-const FLOW_MAPPING_BATCH_SIZE = 15;
-
-// ── Batch Helpers ──────────────────────────────────────────────────────────
+const TARGET_BATCH_OUTPUT_TOKENS = 3600;
 
 /**
- * Splits an array into chunks of at most chunkSize elements.
- * Used to batch component analyses so no single API call exceeds the token limit.
+ * Fixed token overhead per batch response: JSON array brackets, whitespace,
+ * and other structural tokens EZTest does not control.
  */
-function splitIntoBatches<ItemType>(items: ItemType[], chunkSize: number): ItemType[][] {
-  const batches: ItemType[][] = [];
-  for (let startIndex = 0; startIndex < items.length; startIndex += chunkSize) {
-    batches.push(items.slice(startIndex, startIndex + chunkSize));
+const BATCH_RESPONSE_OVERHEAD_TOKENS = 200;
+
+/**
+ * Estimated output tokens for one flow variant (happy-path, error-case, or edge-case).
+ * Based on: flowName (10) + startingRoute (5) + flowKind (5) + 4 steps × 40 tokens/step
+ * + involvedComponents (15) + testPriority (5) + JSON structure overhead (20) ≈ 220 tokens.
+ */
+const ESTIMATED_TOKENS_PER_FLOW_VARIANT = 220;
+
+/**
+ * Estimates how many output tokens the AI will need to describe all flows for one component.
+ * Logic: every 2 interactive elements produce 1 logical user flow, and every logical flow
+ * is expanded into 3 variants (happy-path + error-case + edge-case).
+ * Minimum of 1 logical flow even for components with 0–1 elements (login button, etc.).
+ */
+export function estimateComponentOutputTokens(componentAnalysis: ComponentAnalysis): number {
+  const elementCount = componentAnalysis.interactiveElements.length;
+  const logicalFlowCount = Math.max(1, Math.ceil(elementCount / 2));
+  const totalFlowVariants = logicalFlowCount * 3; // happy-path + error-case + edge-case
+  return totalFlowVariants * ESTIMATED_TOKENS_PER_FLOW_VARIANT;
+}
+
+/**
+ * Splits components into batches where each batch's estimated output token cost
+ * stays within TARGET_BATCH_OUTPUT_TOKENS (90% of the model's output cap).
+ *
+ * Unlike a fixed batch size, this adapts to component complexity:
+ *   - A component with 1 element generates ~3 flow variants ≈ 660 tokens → fits 5 per batch
+ *   - A component with 10 elements generates ~15 flow variants ≈ 3300 tokens → 1 per batch
+ *
+ * A component that alone exceeds the budget is placed in its own batch — we cannot
+ * split a single component further without losing cross-element flow context.
+ */
+export function splitIntoDynamicBatches(
+  componentAnalyses: ComponentAnalysis[],
+): ComponentAnalysis[][] {
+  const batches: ComponentAnalysis[][] = [];
+  let currentBatch: ComponentAnalysis[] = [];
+  let currentBatchTokens = BATCH_RESPONSE_OVERHEAD_TOKENS;
+
+  for (const componentAnalysis of componentAnalyses) {
+    const componentTokenCost = estimateComponentOutputTokens(componentAnalysis);
+
+    // Start a new batch if adding this component would exceed the token budget.
+    // If the current batch is empty, include it anyway — a single very-complex
+    // component cannot be split, and the recovery logic handles any overflow.
+    if (currentBatch.length > 0 && currentBatchTokens + componentTokenCost > TARGET_BATCH_OUTPUT_TOKENS) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentBatchTokens = BATCH_RESPONSE_OVERHEAD_TOKENS;
+    }
+
+    currentBatch.push(componentAnalysis);
+    currentBatchTokens += componentTokenCost;
   }
+
+  if (currentBatch.length > 0) {
+    batches.push(currentBatch);
+  }
+
   return batches;
 }
 
@@ -267,19 +309,31 @@ export async function mapComponentAnalysesToUserFlows(
     }
   }
 
-  // Split components into batches so each API call stays under the 8K token limit.
-  // See FLOW_MAPPING_BATCH_SIZE comment for the token budget rationale.
-  const componentBatches = splitIntoBatches(componentAnalyses, FLOW_MAPPING_BATCH_SIZE);
+  // Split components into token-aware batches so no single API call exceeds the
+  // output token cap. Dynamic batching accounts for component complexity — a form
+  // with 10 inputs generates far more flows than a single-button component.
+  const componentBatches = splitIntoDynamicBatches(componentAnalyses);
+  const totalEstimatedTokens = componentAnalyses.reduce(
+    (total, component) => total + estimateComponentOutputTokens(component),
+    0,
+  );
   logDebug(
-    `Generating user flows from ${componentAnalyses.length} components in ${componentBatches.length} batch(es)...`,
+    `Generating user flows from ${componentAnalyses.length} components in ` +
+    `${componentBatches.length} batch(es) (~${totalEstimatedTokens} estimated output tokens total).`,
   );
 
   const allAiGeneratedFlows: AiGeneratedFlow[] = [];
 
   for (let batchIndex = 0; batchIndex < componentBatches.length; batchIndex++) {
     const currentBatch = componentBatches[batchIndex];
+    const batchEstimatedTokens = currentBatch.reduce(
+      (total, component) => total + estimateComponentOutputTokens(component),
+      BATCH_RESPONSE_OVERHEAD_TOKENS,
+    );
     const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
-    logDebug(`  ${batchLabel}: ${currentBatch.map(c => c.componentName).join(', ')}`);
+    logDebug(
+      `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
+    );
 
     const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec);
     const flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
