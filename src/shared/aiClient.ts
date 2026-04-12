@@ -48,6 +48,48 @@ async function createOpenAiAdapter(apiKey: string): Promise<ProviderAdapter> {
   };
 }
 
+// ── GitHub Copilot Adapter ─────────────────────────────────────────────────
+
+/** Base URL for the GitHub Models API — compatible with the OpenAI chat completions spec. */
+const GITHUB_MODELS_BASE_URL = 'https://models.inference.ai.azure.com';
+
+/**
+ * Adapter for the GitHub Models API (used by GitHub Copilot subscribers).
+ * Reuses the OpenAI SDK since GitHub Models is OpenAI-spec compatible.
+ * Authentication is a GitHub Personal Access Token with the `models:read` scope.
+ */
+async function createGitHubCopilotAdapter(githubToken: string): Promise<ProviderAdapter> {
+  const { default: OpenAI } = await import('openai');
+
+  // The OpenAI SDK accepts a custom baseURL + any token format in apiKey —
+  // GitHub Models validates the Bearer token server-side, not the SDK itself
+  const githubModelsClient = new OpenAI({
+    apiKey: githubToken,
+    baseURL: GITHUB_MODELS_BASE_URL,
+  });
+
+  return {
+    async sendMessages(messages, modelName, maxTokens) {
+      const response = await githubModelsClient.chat.completions.create({
+        model: modelName,
+        messages,
+        max_tokens: maxTokens,
+      });
+
+      const firstChoice = response.choices[0];
+      if (!firstChoice?.message.content) {
+        throw new Error('GitHub Models API returned an empty response');
+      }
+
+      return {
+        content: firstChoice.message.content,
+        tokensUsed: response.usage?.total_tokens ?? 0,
+        modelUsed: response.model,
+      };
+    },
+  };
+}
+
 // ── Anthropic Adapter ──────────────────────────────────────────────────────
 
 /**
@@ -166,12 +208,18 @@ export class AiClient {
   async initialize(): Promise<void> {
     if (!this.aiConfig.apiKey) {
       throw new Error(
-        `No AI API key found. Set OPENAI_API_KEY or ANTHROPIC_API_KEY in your environment, ` +
-        `or configure it in eztest.config.json.`
+        `No AI API key found. Please set one of the following in your .env file:\n` +
+        `  EZTEST_GITHUB_TOKEN=<your GitHub PAT with models:read scope>  (GitHub Copilot)\n` +
+        `  OPENAI_API_KEY=<your OpenAI key>                              (OpenAI)\n` +
+        `  ANTHROPIC_API_KEY=<your Anthropic key>                        (Anthropic Claude)\n\n` +
+        `Create a free GitHub PAT at: https://github.com/settings/tokens?type=beta\n` +
+        `(Account permissions → Models → Read-only)`
       );
     }
 
-    if (this.aiConfig.provider === 'openai') {
+    if (this.aiConfig.provider === 'github') {
+      this.providerAdapter = await createGitHubCopilotAdapter(this.aiConfig.apiKey);
+    } else if (this.aiConfig.provider === 'openai') {
       this.providerAdapter = await createOpenAiAdapter(this.aiConfig.apiKey);
     } else {
       this.providerAdapter = await createAnthropicAdapter(this.aiConfig.apiKey);

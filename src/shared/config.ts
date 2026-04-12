@@ -151,6 +151,12 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     environmentOverrides.apiKey = process.env['ANTHROPIC_API_KEY'];
     environmentOverrides.provider = 'anthropic';
   }
+  if (process.env['EZTEST_GITHUB_TOKEN'] || process.env['GITHUB_MODELS_TOKEN']) {
+    // GitHub Copilot subscription (GitHub Models API) takes highest precedence —
+    // most users will have this via their Copilot subscription and won't need a paid API key
+    environmentOverrides.apiKey = (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])!;
+    environmentOverrides.provider = 'github';
+  }
   if (process.env['EZTEST_AI_PROVIDER']) {
     environmentOverrides.provider = process.env['EZTEST_AI_PROVIDER'] as AiProviderName;
   }
@@ -209,6 +215,8 @@ export function getDefaultModelForProvider(provider: AiProviderName): string {
   const modelMap: Record<AiProviderName, string> = {
     openai: 'gpt-4o',
     anthropic: 'claude-3-5-sonnet-20241022',
+    // GitHub Models API (Copilot subscription) — gpt-4o gives the best behavioral test quality
+    github: 'gpt-4o',
   };
   return modelMap[provider];
 }

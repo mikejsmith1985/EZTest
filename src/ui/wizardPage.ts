@@ -349,10 +349,11 @@ export function buildWizardPageHtml(): string {
             <!-- Shown only when no key found -->
             <div class="api-key-form" id="apiKeyForm" style="display:none">
               <select id="providerSelect">
+                <option value="github">GitHub Copilot (recommended — uses your Copilot subscription)</option>
                 <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic</option>
+                <option value="anthropic">Anthropic (Claude)</option>
               </select>
-              <input type="password" id="apiKeyInput" placeholder="sk-…" autocomplete="off" />
+              <input type="password" id="apiKeyInput" placeholder="GitHub PAT, sk-… or sk-ant-…" autocomplete="off" />
               <button class="btn btn-save" id="saveKeyBtn" onclick="saveApiKey()">Save</button>
               <span class="save-note">Saved locally to .env</span>
             </div>
@@ -530,14 +531,14 @@ export function buildWizardPageHtml(): string {
       var subtitleEl = document.getElementById('apiKeySubtitle');
       var formEl     = document.getElementById('apiKeyForm');
       if (apiKeyInfo.ok) {
-        var providerLabel = apiKeyInfo.hasOpenAi ? 'OpenAI' : 'Anthropic';
+        var providerLabel = apiKeyInfo.hasGithub ? 'GitHub Copilot' : (apiKeyInfo.hasOpenAi ? 'OpenAI' : 'Anthropic');
         iconEl.textContent = '\u2705';
-        subtitleEl.textContent = providerLabel + '/Anthropic key found';
+        subtitleEl.textContent = providerLabel + ' key found';
         subtitleEl.className = 'check-subtitle success-text';
         formEl.style.display = 'none';
       } else {
         iconEl.textContent = '\u274C';
-        subtitleEl.textContent = 'No API key found.';
+        subtitleEl.textContent = 'No API key found. Add one below or set EZTEST_GITHUB_TOKEN in .env';
         subtitleEl.className = 'check-subtitle error-text';
         formEl.style.display = 'flex';
       }

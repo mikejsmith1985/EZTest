@@ -192,9 +192,10 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     const nodeMajorVersion  = parseInt(nodeVersionString.replace('v', '').split('.')[0], 10);
     const isNodeVersionOk   = nodeMajorVersion >= 18;
 
+    const hasGithubKey   = Boolean((process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])?.trim());
     const hasOpenAiKey    = Boolean(process.env['OPENAI_API_KEY']?.trim());
     const hasAnthropicKey = Boolean(process.env['ANTHROPIC_API_KEY']?.trim());
-    const hasAnyApiKey    = hasOpenAiKey || hasAnthropicKey;
+    const hasAnyApiKey    = hasGithubKey || hasOpenAiKey || hasAnthropicKey;
 
     // Playwright can be in node_modules/.bin with or without .cmd (Windows)
     const playwrightBinPath    = join(process.cwd(), 'node_modules', '.bin', 'playwright');
@@ -207,7 +208,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
         ok: isNodeVersionOk,
       },
       apiKey: {
-        hasOpenAi:    hasOpenAiKey,
+        hasGithub:   hasGithubKey,
+        hasOpenAi:   hasOpenAiKey,
         hasAnthropic: hasAnthropicKey,
         ok: hasAnyApiKey,
       },
@@ -226,8 +228,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       return;
     }
 
-    const envKeyName =
-      provider === 'openai' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+    // Map provider name to the correct environment variable name
+    const envKeyMap: Record<string, string> = {
+      github:    'EZTEST_GITHUB_TOKEN',
+      openai:    'OPENAI_API_KEY',
+      anthropic: 'ANTHROPIC_API_KEY',
+    };
+    const envKeyName = envKeyMap[provider] ?? 'OPENAI_API_KEY';
 
     persistEnvKey(envKeyName, apiKey);
     persistEnvKey('EZTEST_AI_PROVIDER', provider);
