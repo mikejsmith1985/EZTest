@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment variables — never commit secrets
+.env
+.env.local
+.env.*.local
+
+# Playwright test artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# TypeScript build info
+tsconfig.tsbuildinfo
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor settings (keep .vscode/extensions.json but not workspace state)
+.vscode/settings.json
+.vscode/launch.json
+*.log

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<!--
+  EZTest Sample App — a minimal single-page application used as a fixture
+  for integration tests. It exercises the key interaction types that EZTest
+  must be able to record: navigation, button clicks, form inputs, and DOM
+  state changes resulting from those interactions.
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EZTest Sample App</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 0 20px; }
+    h1 { font-size: 1.5rem; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; border-radius: 4px; border: 1px solid #ccc; }
+    button:hover { background: #f0f0f0; }
+    input, select { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; margin: 4px; }
+    .counter-value { font-size: 2rem; font-weight: bold; display: inline-block; min-width: 60px; text-align: center; }
+    .message { margin-top: 12px; padding: 10px; border-radius: 4px; background: #f0fdf4; color: #166534; display: none; }
+    .message.visible { display: block; }
+    section { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e5e7eb; }
+  </style>
+</head>
+<body>
+  <h1>EZTest Sample App</h1>
+  <p>This fixture app is used for EZTest integration tests.</p>
+
+  <!-- ── Counter Widget ── -->
+  <section>
+    <h2>Counter</h2>
+    <button id="decrement-button" aria-label="Decrement counter" data-testid="btn-decrement">−</button>
+    <span id="counter-display" class="counter-value" data-testid="counter-value">0</span>
+    <button id="increment-button" aria-label="Increment counter" data-testid="btn-increment">+</button>
+    <button id="reset-button" data-testid="btn-reset" style="margin-left: 12px;">Reset</button>
+  </section>
+
+  <!-- ── Contact Form ── -->
+  <section>
+    <h2>Contact Form</h2>
+    <form id="contact-form">
+      <div>
+        <label for="name-input">Name:</label>
+        <input id="name-input" type="text" name="name" placeholder="Your name" data-testid="input-name" />
+      </div>
+      <div style="margin-top: 8px;">
+        <label for="topic-select">Topic:</label>
+        <select id="topic-select" name="topic" data-testid="select-topic">
+          <option value="">Select a topic</option>
+          <option value="bug">Report a bug</option>
+          <option value="feature">Request a feature</option>
+          <option value="question">Ask a question</option>
+        </select>
+      </div>
+      <div style="margin-top: 8px;">
+        <button type="submit" data-testid="btn-submit">Submit</button>
+      </div>
+    </form>
+    <div id="form-success-message" class="message" data-testid="form-success-message">
+      ✓ Form submitted successfully!
+    </div>
+  </section>
+
+  <script>
+    // ── Counter logic ──
+    let counterValue = 0;
+    const counterDisplay = document.getElementById('counter-display');
+
+    document.getElementById('increment-button').addEventListener('click', function () {
+      counterValue += 1;
+      counterDisplay.textContent = String(counterValue);
+    });
+
+    document.getElementById('decrement-button').addEventListener('click', function () {
+      counterValue -= 1;
+      counterDisplay.textContent = String(counterValue);
+    });
+
+    document.getElementById('reset-button').addEventListener('click', function () {
+      counterValue = 0;
+      counterDisplay.textContent = '0';
+    });
+
+    // ── Form logic ──
+    document.getElementById('contact-form').addEventListener('submit', function (event) {
+      event.preventDefault();
+      const successMessage = document.getElementById('form-success-message');
+      successMessage.classList.add('visible');
+      // Reset after 3 seconds so the form can be submitted again in tests
+      setTimeout(function () { successMessage.classList.remove('visible'); }, 3000);
+    });
+  </script>
+</body>
+</html>

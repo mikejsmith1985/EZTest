@@ -1,0 +1,67 @@
+{
+  "name": "eztest",
+  "version": "0.1.0",
+  "description": "AI-powered behavioral testing companion — reads your code, understands user intent, generates real Playwright tests",
+  "main": "dist/cli/index.js",
+  "bin": {
+    "eztest": "dist/cli/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "dev": "tsx src/cli/index.ts",
+    "test": "playwright test",
+    "test:unit": "playwright test tests/unit",
+    "test:integration": "playwright test tests/integration",
+    "lint": "eslint src/",
+    "format": "prettier --write src/**/*.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["testing", "playwright", "ai", "e2e", "behavioral-testing"],
+  "author": "EZTest Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mikejsmith1985/EZTest.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0",
+    "@typescript-eslint/eslint-plugin": "^8.58.1",
+    "@typescript-eslint/parser": "^8.58.1",
+    "eslint": "^10.2.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.8.2",
+    "socket.io-client": "^4.8.3",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.88.0",
+    "@babel/parser": "^7.29.2",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0",
+    "@types/babel__parser": "^7.0.0",
+    "@types/babel__traverse": "^7.28.0",
+    "@types/express": "^5.0.6",
+    "@types/socket.io": "^3.0.1",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.3",
+    "dotenv": "^17.4.1",
+    "express": "^5.2.1",
+    "glob": "^13.0.6",
+    "openai": "^6.34.0",
+    "ora": "^9.3.0",
+    "socket.io": "^4.8.3"
+  }
+}
