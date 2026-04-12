@@ -530,10 +530,24 @@ export function buildWizardPageHtml(): string {
       var iconEl     = document.getElementById('apiKeyIcon');
       var subtitleEl = document.getElementById('apiKeySubtitle');
       var formEl     = document.getElementById('apiKeyForm');
+
+      // Auto-select whichever provider already has a key configured so the
+      // user sees a green checkmark immediately — no manual selection needed.
+      var providerSelect = document.getElementById('providerSelect');
+      if (apiKeyInfo.hasGithub) {
+        providerSelect.value = 'github';
+      } else if (apiKeyInfo.hasOpenAi) {
+        providerSelect.value = 'openai';
+      } else if (apiKeyInfo.hasAnthropic) {
+        providerSelect.value = 'anthropic';
+      }
+
       if (apiKeyInfo.ok) {
-        var providerLabel = apiKeyInfo.hasGithub ? 'GitHub Copilot' : (apiKeyInfo.hasOpenAi ? 'OpenAI' : 'Anthropic');
+        var providerLabel = apiKeyInfo.hasGithub ? 'GitHub Copilot'
+                          : apiKeyInfo.hasOpenAi  ? 'OpenAI'
+                          : 'Anthropic';
         iconEl.textContent = '\u2705';
-        subtitleEl.textContent = providerLabel + ' key found';
+        subtitleEl.textContent = providerLabel + ' key found \u2014 ready to go!';
         subtitleEl.className = 'check-subtitle success-text';
         formEl.style.display = 'none';
       } else {
