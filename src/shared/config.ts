@@ -150,31 +150,72 @@ function loadCommonJsConfigOverrides(configFilePath: string): Partial<EZTestConf
 // ── Environment Variable Reading ───────────────────────────────────────────
 
 /**
+ * Maps each AI provider name to the environment variable that holds its API key.
+ * Used for both key lookup and provider validation.
+ */
+const PROVIDER_KEY_ENV_VARS: Record<AiProviderName, string> = {
+  openai:    'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  github:    'EZTEST_GITHUB_TOKEN',
+};
+
+/**
+ * Returns the API key value for a given provider, or null if not set.
+ * Also checks GITHUB_MODELS_TOKEN as a fallback for the github provider.
+ */
+function resolveApiKeyForProvider(provider: AiProviderName): string | null {
+  if (provider === 'github') {
+    return process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'] ?? null;
+  }
+  const envVarName = PROVIDER_KEY_ENV_VARS[provider];
+  return process.env[envVarName] ?? null;
+}
+
+/**
  * Reads AI configuration from environment variables.
- * Environment variables always take precedence over config file values for security.
+ *
+ * Priority order (later wins):
+ *   1. OPENAI_API_KEY present → provider=openai
+ *   2. ANTHROPIC_API_KEY present → provider=anthropic
+ *   3. EZTEST_GITHUB_TOKEN / GITHUB_MODELS_TOKEN present → provider=github
+ *   4. EZTEST_AI_PROVIDER explicit → ONLY applied when the matching API key is also set.
+ *      This prevents a stale EZTEST_AI_PROVIDER=openai from overriding a live GitHub token
+ *      when the user has no OpenAI key configured.
  */
 function readAiConfigFromEnvironment(): Partial<AiConfig> {
   const environmentOverrides: Partial<AiConfig> = {};
 
-  // Determine provider from which API key is set, if not explicitly configured
+  // Step 1–3: Provider inferred from which keys are present
   if (process.env['OPENAI_API_KEY']) {
     environmentOverrides.apiKey = process.env['OPENAI_API_KEY'];
     environmentOverrides.provider = 'openai';
   }
   if (process.env['ANTHROPIC_API_KEY']) {
-    // Anthropic key takes precedence if both are set — user can override in config
     environmentOverrides.apiKey = process.env['ANTHROPIC_API_KEY'];
     environmentOverrides.provider = 'anthropic';
   }
-  if (process.env['EZTEST_GITHUB_TOKEN'] || process.env['GITHUB_MODELS_TOKEN']) {
-    // GitHub Copilot subscription (GitHub Models API) takes highest precedence —
-    // most users will have this via their Copilot subscription and won't need a paid API key
+  if (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN']) {
+    // GitHub Copilot (via GitHub Models API) takes highest precedence among key-based detection —
+    // most users will have this via their Copilot subscription without needing a paid API key
     environmentOverrides.apiKey = (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])!;
     environmentOverrides.provider = 'github';
   }
+
+  // Step 4: Explicit provider override — only honoured when the matching key is available.
+  // A stale EZTEST_AI_PROVIDER=openai (e.g. written by a previous UI config session) must NOT
+  // override a valid GitHub token. If the user truly wants to switch providers they must also
+  // have the matching API key present.
   if (process.env['EZTEST_AI_PROVIDER']) {
-    environmentOverrides.provider = process.env['EZTEST_AI_PROVIDER'] as AiProviderName;
+    const requestedProvider = process.env['EZTEST_AI_PROVIDER'] as AiProviderName;
+    const matchingApiKey = resolveApiKeyForProvider(requestedProvider);
+    if (matchingApiKey) {
+      environmentOverrides.apiKey = matchingApiKey;
+      environmentOverrides.provider = requestedProvider;
+    }
+    // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
+    // whatever provider/key was detected from the keys that ARE present.
   }
+
   if (process.env['EZTEST_AI_MODEL']) {
     environmentOverrides.modelOverride = process.env['EZTEST_AI_MODEL'];
   }

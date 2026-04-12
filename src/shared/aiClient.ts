@@ -24,7 +24,10 @@ interface ProviderAdapter {
  */
 async function createOpenAiAdapter(apiKey: string): Promise<ProviderAdapter> {
   const { default: OpenAI } = await import('openai');
-  const openAiClient = new OpenAI({ apiKey });
+  // Disable the OpenAI SDK's built-in retry — EZTest has its own retry wrapper with
+  // exponential backoff and retry-after header support. Double-retrying compounds
+  // the wait time from GitHub Models rate-limit cooldowns from seconds to minutes.
+  const openAiClient = new OpenAI({ apiKey, maxRetries: 0 });
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
@@ -62,10 +65,12 @@ async function createGitHubCopilotAdapter(githubToken: string): Promise<Provider
   const { default: OpenAI } = await import('openai');
 
   // The OpenAI SDK accepts a custom baseURL + any token format in apiKey —
-  // GitHub Models validates the Bearer token server-side, not the SDK itself
+  // GitHub Models validates the Bearer token server-side, not the SDK itself.
+  // maxRetries: 0 — EZTest's own retry wrapper handles retries with retry-after support.
   const githubModelsClient = new OpenAI({
     apiKey: githubToken,
     baseURL: GITHUB_MODELS_BASE_URL,
+    maxRetries: 0,
   });
 
   return {
@@ -139,25 +144,100 @@ const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 const RETRY_BASE_DELAY_MS = 1000;
 
 /**
+ * Maximum retry-after delay we will actually honor.
+ * GitHub Models returns a retry-after equal to the seconds until the DAILY quota
+ * resets (~23 hours) when the daily limit is exhausted. Waiting that long makes
+ * no sense — we detect it and fail fast with an actionable message instead.
+ */
+const MAX_RETRYABLE_DELAY_MS = 300_000; // 5 minutes — anything longer signals quota exhaustion
+
+/**
  * Determines whether an error is a transient API failure that should be retried.
+ * Token-limit errors (413 tokens_limit_reached) are included because GitHub Models
+ * uses them for BOTH per-request size violations and per-minute TPM rate limits.
  */
 function isTransientApiError(error: unknown): boolean {
   if (error instanceof Error) {
     const errorMessage = error.message.toLowerCase();
-    // Rate limits and server errors are worth retrying
-    if (errorMessage.includes('rate limit') || errorMessage.includes('overloaded')) {
+    // Rate limits, token limits, and server errors are worth retrying
+    if (
+      errorMessage.includes('rate limit') ||
+      errorMessage.includes('overloaded') ||
+      errorMessage.includes('tokens_limit_reached') ||
+      errorMessage.includes('too many requests')
+    ) {
       return true;
     }
   }
   // Check for HTTP status-based errors (varies by SDK)
   if (typeof error === 'object' && error !== null && 'status' in error) {
-    return RETRYABLE_STATUS_CODES.has((error as { status: number }).status);
+    const httpStatus = (error as { status: number }).status;
+    return RETRYABLE_STATUS_CODES.has(httpStatus) || httpStatus === 413;
   }
   return false;
 }
 
 /**
+ * Extracts the `retry-after` delay in milliseconds from an API error, if present.
+ * GitHub Models (and OpenAI) include this header in 429 responses to tell clients
+ * exactly how long to wait before retrying. Ignoring it and using a short fixed
+ * backoff means we retry too soon and accumulate additional penalties.
+ *
+ * Returns null if no valid retry-after header is found OR if the value exceeds
+ * MAX_RETRYABLE_DELAY_MS (which signals daily quota exhaustion, not a short rate limit).
+ */
+function extractRetryAfterDelayMs(error: unknown): number | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
+  if (!errorWithHeaders.headers) return null;
+
+  let retryAfterValue: string | null | undefined;
+  if (errorWithHeaders.headers instanceof Headers) {
+    retryAfterValue = errorWithHeaders.headers.get('retry-after');
+  } else if (typeof errorWithHeaders.headers === 'object') {
+    retryAfterValue = (errorWithHeaders.headers as Record<string, string>)['retry-after'];
+  }
+
+  if (!retryAfterValue) return null;
+
+  const retryAfterSeconds = parseFloat(retryAfterValue);
+  if (!isNaN(retryAfterSeconds) && retryAfterSeconds > 0) {
+    const delayMs = retryAfterSeconds * 1000 + 500;
+    // If the server is asking us to wait longer than 5 minutes, it's a quota-exhaustion
+    // signal (GitHub Models returns ~23 hours when the daily limit is hit). Return null
+    // so the caller falls through to the quota-exhaustion check in executeWithRetry.
+    if (delayMs > MAX_RETRYABLE_DELAY_MS) {
+      logWarning(
+        `API quota exhausted — retry-after is ${Math.round(retryAfterSeconds / 3600)}h ${Math.round((retryAfterSeconds % 3600) / 60)}m. ` +
+        `Daily limit reached. Switch to a different AI provider or wait for the quota to reset.`
+      );
+      return null;
+    }
+    return delayMs;
+  }
+  return null;
+}
+
+/**
+ * Returns true if the error object has any retry-after header, regardless of its value.
+ * Used to distinguish between "no rate limit info" (use backoff) vs "quota exhausted"
+ * (extractRetryAfterDelayMs returned null because the delay was too long to honor).
+ */
+function hasRetryAfterHeader(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false;
+  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
+  if (!errorWithHeaders.headers) return false;
+  if (errorWithHeaders.headers instanceof Headers) {
+    return errorWithHeaders.headers.has('retry-after');
+  }
+  return 'retry-after' in (errorWithHeaders.headers as Record<string, string>);
+}
+
+/**
  * Executes an AI API call with exponential backoff retry on transient failures.
+ * Respects the `retry-after` header when present — GitHub Models and OpenAI send
+ * this with 429 responses. Using it prevents compounding rate-limit penalties
+ * that would otherwise turn a 15-second cooldown into a multi-minute stall.
  */
 async function executeWithRetry<ReturnType>(
   operation: () => Promise<ReturnType>,
@@ -173,9 +253,28 @@ async function executeWithRetry<ReturnType>(
       lastError = callError;
 
       if (attemptIndex < maxRetryAttempts && isTransientApiError(callError)) {
-        const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attemptIndex);
-        logWarning(`AI call failed (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1}) for "${operationDescription}". Retrying in ${delayMs}ms...`);
-        await new Promise(resolve => setTimeout(resolve, delayMs));
+        // Prefer the server-specified retry-after delay over our own backoff.
+        // The GitHub Models API sends a retry-after header that tells us exactly
+        // how long its rate-limit window is (often 15-60 seconds). Ignoring it
+        // and retrying with a 1-4 second backoff triggers additional penalties.
+        const retryAfterDelayMs = extractRetryAfterDelayMs(callError);
+
+        // extractRetryAfterDelayMs returns null for quota-exhaustion delays (> 5 min).
+        // When a long retry-after is detected, the warning is already logged; we stop
+        // retrying immediately because no amount of waiting will help until the daily
+        // quota resets (~23 hours on GitHub Models free tier).
+        if (retryAfterDelayMs === null && hasRetryAfterHeader(callError)) {
+          break;
+        }
+
+        const backoffDelayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attemptIndex);
+        const waitDelayMs = retryAfterDelayMs ?? backoffDelayMs;
+
+        logWarning(
+          `AI call failed (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1}) for "${operationDescription}". ` +
+          `Retrying in ${Math.round(waitDelayMs / 1000)}s${retryAfterDelayMs ? ' (retry-after)' : ''}...`,
+        );
+        await new Promise(resolve => setTimeout(resolve, waitDelayMs));
       } else {
         break;
       }

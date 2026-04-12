@@ -18,6 +18,38 @@ import {
 } from './promptTemplates.js';
 import { logDebug, logWarning } from '../shared/logger.js';
 
+// ── Batching Constants ─────────────────────────────────────────────────────
+
+/**
+ * Maximum number of components to include in a single flow-generation API call.
+ *
+ * The GitHub Models API (free tier) limits request bodies to ~8000 input tokens.
+ * With the reduced source excerpt in buildUserFlowGenerationPrompt:
+ *   - ~1100 tokens: prompt overhead (system prompt + user instructions)
+ *   - ~155 tokens per component: name + element list + 400-char source excerpt
+ *   - 20 components × 155 = 3100 + 1100 overhead = 4200 tokens ✅ well under limit
+ *   - 40 components × 155 = 6200 + 1100 overhead = 7300 tokens ✅ still under limit
+ *
+ * A batch size of 40 means most projects (< 40 UI components) are handled in ONE
+ * API call, avoiding rate-limit 429 waits that occur with many small calls.
+ * For projects with > 40 components, it still batches efficiently.
+ */
+const FLOW_MAPPING_BATCH_SIZE = 40;
+
+// ── Batch Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Splits an array into chunks of at most chunkSize elements.
+ * Used to batch component analyses so no single API call exceeds the token limit.
+ */
+function splitIntoBatches<ItemType>(items: ItemType[], chunkSize: number): ItemType[][] {
+  const batches: ItemType[][] = [];
+  for (let startIndex = 0; startIndex < items.length; startIndex += chunkSize) {
+    batches.push(items.slice(startIndex, startIndex + chunkSize));
+  }
+  return batches;
+}
+
 // ── AI Response Parsing ────────────────────────────────────────────────────
 
 /** The shape of the AI's response to the component intent analysis prompt. */
@@ -150,6 +182,9 @@ export interface FlowMapperOptions {
  * Maps a set of ComponentAnalysis objects into UserFlow objects by using AI
  * to understand the connections between components and the journeys users take.
  *
+ * Components are processed in batches to stay within the GitHub Models API
+ * 8K-token-per-request limit. Flows from all batches are merged and returned.
+ *
  * This is the bridge between raw code analysis and test generation.
  */
 export async function mapComponentAnalysesToUserFlows(
@@ -159,8 +194,9 @@ export async function mapComponentAnalysesToUserFlows(
 ): Promise<UserFlow[]> {
   const { targetAppUrl, shouldAnalyzeIndividualComponents, appSpec } = options;
 
-  // Optionally run per-component intent analysis to enrich the context
-  // This helps the flow generation prompt produce better-connected journeys
+  // Optionally run per-component intent analysis to enrich the context.
+  // Only run this when the component count is small enough to be worthwhile
+  // without burning too many API calls.
   if (shouldAnalyzeIndividualComponents && componentAnalyses.length <= 20) {
     logDebug(`Running per-component intent analysis for ${componentAnalyses.length} components...`);
 
@@ -175,29 +211,43 @@ export async function mapComponentAnalysesToUserFlows(
     }
   }
 
-  // Generate the complete set of user flows from the full component picture
-  logDebug(`Generating user flows from ${componentAnalyses.length} components...`);
-
-  // Pass the app spec to give the AI business intent alongside mechanical code analysis
-  const flowGenerationMessages = buildUserFlowGenerationPrompt(componentAnalyses, targetAppUrl, appSpec);
-  const flowGenerationResponse = await aiClient.chat(
-    flowGenerationMessages,
-    'user flow generation',
+  // Split components into batches so each API call stays under the 8K token limit.
+  // See FLOW_MAPPING_BATCH_SIZE comment for the token budget rationale.
+  const componentBatches = splitIntoBatches(componentAnalyses, FLOW_MAPPING_BATCH_SIZE);
+  logDebug(
+    `Generating user flows from ${componentAnalyses.length} components in ${componentBatches.length} batch(es)...`,
   );
 
-  const aiGeneratedFlows = parseAiJsonResponse<AiGeneratedFlow[]>(
-    flowGenerationResponse.content,
-    'user flow generation',
-  );
+  const allAiGeneratedFlows: AiGeneratedFlow[] = [];
 
-  if (!aiGeneratedFlows || !Array.isArray(aiGeneratedFlows)) {
-    logWarning('Flow generation returned no valid flows. Check AI response above.');
+  for (let batchIndex = 0; batchIndex < componentBatches.length; batchIndex++) {
+    const currentBatch = componentBatches[batchIndex];
+    const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
+    logDebug(`  ${batchLabel}: ${currentBatch.map(c => c.componentName).join(', ')}`);
+
+    const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec);
+    const flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+
+    const batchFlows = parseAiJsonResponse<AiGeneratedFlow[]>(
+      flowGenerationResponse.content,
+      batchLabel,
+    );
+
+    if (batchFlows && Array.isArray(batchFlows)) {
+      allAiGeneratedFlows.push(...batchFlows);
+    } else {
+      logWarning(`Batch ${batchIndex + 1} returned no valid flows — skipping.`);
+    }
+  }
+
+  if (allAiGeneratedFlows.length === 0) {
+    logWarning('All flow generation batches returned no valid flows. Check AI responses above.');
     return [];
   }
 
-  logDebug(`AI generated ${aiGeneratedFlows.length} user flows`);
+  logDebug(`AI generated ${allAiGeneratedFlows.length} user flows across all batches`);
 
-  const normalizedFlows = aiGeneratedFlows.map(aiFlow =>
+  const normalizedFlows = allAiGeneratedFlows.map(aiFlow =>
     normalizeAiGeneratedFlow(aiFlow, targetAppUrl),
   );
 

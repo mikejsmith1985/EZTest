@@ -208,25 +208,74 @@ test.describe('analyzeSourceDirectory', () => {
     }
   });
 
-  test('respects maxFileCount limit', async () => {
+  test('excludes *.test.tsx files even when they live in a routes/ directory (high-priority dir)', async () => {
+    // Regression test: server-side test files in routes/ scored 100 (high-value directory)
+    // and consumed the top-N file budget with files that have no interactive UI elements.
+    // ADDITIONAL_EXCLUDE_PATTERNS must filter them before scoring.
     const testDirectory = createTestDirectory();
     try {
-      // Write multiple files to ensure the limit is enforced
-      for (let fileIndex = 0; fileIndex < 5; fileIndex++) {
-        writeFixture(testDirectory, `Button${fileIndex}.tsx`, `
-          export function Button${fileIndex}() {
-            return <button onClick={handleClick}>Click me</button>;
-          }
-        `);
-      }
+      const routesDirectory = join(testDirectory, 'routes');
+      mkdirSync(routesDirectory, { recursive: true });
+
+      // A test file (should be excluded) in a high-scoring routes/ directory
+      writeFixture(routesDirectory, 'UserRoutes.test.ts', `
+        import { describe, it, expect } from 'vitest';
+        describe('user routes', () => {
+          it('should handle GET /users', async () => {
+            const res = await request(app).get('/users');
+            expect(res.status).toBe(200);
+          });
+        });
+      `);
+
+      // A real page component (should be included)
+      writeFixture(testDirectory, 'LoginPage.tsx', `
+        export function LoginPage() {
+          return <button onClick={handleLogin}>Sign In</button>;
+        }
+      `);
 
       const analyses = await analyzeSourceDirectory({
         sourceDirectory: testDirectory,
         excludePatterns: [],
-        maxFileCount: 2, // Limit to 2 files
+        maxFileCount: 10,
       });
 
-      expect(analyses.length).toBeLessThanOrEqual(2);
+      const fileNames = analyses.map(analysis => analysis.componentName);
+      // Test file must be excluded regardless of its directory score
+      expect(fileNames).not.toContain('UserRoutes.test');
+      // Real component must be included
+      expect(fileNames).toContain('LoginPage');
+    } finally {
+      cleanupTestDirectory(testDirectory);
+    }
+  });
+
+  test('excludes *.spec.ts files from analysis', async () => {
+    const testDirectory = createTestDirectory();
+    try {
+      writeFixture(testDirectory, 'CheckoutPage.spec.ts', `
+        test('checkout works', async () => {
+          const page = await browser.newPage();
+          await page.goto('/checkout');
+        });
+      `);
+
+      writeFixture(testDirectory, 'CheckoutPage.tsx', `
+        export function CheckoutPage() {
+          return <button onClick={handleCheckout}>Complete Purchase</button>;
+        }
+      `);
+
+      const analyses = await analyzeSourceDirectory({
+        sourceDirectory: testDirectory,
+        excludePatterns: [],
+        maxFileCount: 10,
+      });
+
+      const fileNames = analyses.map(analysis => analysis.componentName);
+      expect(fileNames).not.toContain('CheckoutPage.spec');
+      expect(fileNames).toContain('CheckoutPage');
     } finally {
       cleanupTestDirectory(testDirectory);
     }

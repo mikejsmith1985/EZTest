@@ -9,7 +9,7 @@
  * Supports: React/JSX, TypeScript/TSX. Vue/Angular support is via the plugin system.
  */
 import { readFileSync } from 'node:fs';
-import { resolve, relative, extname, basename } from 'node:path';
+import { resolve, relative, extname, basename, join } from 'node:path';
 import { glob } from 'glob';
 import * as babelParser from '@babel/parser';
 import babelTraverse from '@babel/traverse';
@@ -350,9 +350,16 @@ const PARSEABLE_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 /**
  * Extra glob ignore patterns always applied during file discovery — regardless of caller config.
  * Catches generated artifacts (Storybook stories, declaration stubs, minified bundles, build
- * output, mock fixtures) that never contain user-facing UI flows worth testing.
+ * output, mock fixtures, and test files) that never contain user-facing UI flows worth testing.
+ *
+ * NOTE: Test and spec files are included here as a safety net even though callers typically
+ * also pass them via globalExcludePatterns. Server-side test files in routes/ directories
+ * score 100 (highest tier) because of their parent directory — without explicit exclusion
+ * they would consume the entire top-N file budget with zero interactive UI elements.
  */
 const ADDITIONAL_EXCLUDE_PATTERNS: string[] = [
+  '**/*.test.*',
+  '**/*.spec.*',
   '**/*.stories.*',
   '**/*.story.*',
   '**/*.d.ts',
@@ -363,6 +370,7 @@ const ADDITIONAL_EXCLUDE_PATTERNS: string[] = [
   '**/vendor/**',
   '**/.turbo/**',
   '**/coverage/**',
+  '**/__tests__/**',
   '**/__mocks__/**',
   '**/__fixtures__/**',
   '**/fixtures/**',
@@ -472,17 +480,27 @@ async function discoverSourceFiles(
   sourceDirectory: string,
   excludePatterns: string[],
 ): Promise<string[]> {
-  // glob requires forward slashes even on Windows — normalize backslashes to forward slashes
-  const normalizedSourceDirectory = sourceDirectory.replace(/\\/g, '/');
-  const globPattern = `${normalizedSourceDirectory}/**/*{${PARSEABLE_EXTENSIONS.join(',')}}`;
+  // IMPORTANT: On Windows, glob's ignore patterns only work correctly when the
+  // main glob pattern is RELATIVE (not absolute). With an absolute pattern like
+  // "C:/foo/**/*.ts", glob returns absolute paths with Windows backslashes, and
+  // relative ignore patterns like "**/node_modules/**" fail to match because
+  // minimatch splits on "/" but the path uses "\".
+  //
+  // Fix: Use cwd + relative pattern so glob works with relative paths throughout,
+  // then manually resolve each result back to absolute after filtering is complete.
+  const relativeGlobPattern = `**/*{${PARSEABLE_EXTENSIONS.join(',')}}`;
 
   // Always exclude the additional patterns on top of whatever the caller provides
   const allExcludePatterns = [...excludePatterns, ...ADDITIONAL_EXCLUDE_PATTERNS];
 
-  const discoveredFiles = await glob(globPattern, {
+  const relativeFiles = await glob(relativeGlobPattern, {
+    cwd: sourceDirectory,
     ignore: allExcludePatterns,
-    absolute: true,
+    nodir: true, // Prevent directories named like *.js (e.g. node_modules/ipaddr.js) from being returned
   });
+
+  // Resolve each relative path back to an absolute path rooted at sourceDirectory
+  const discoveredFiles = relativeFiles.map(relativeFilePath => join(sourceDirectory, relativeFilePath));
 
   logDebug(`Discovered ${discoveredFiles.length} source files in ${sourceDirectory}`);
   return discoveredFiles;

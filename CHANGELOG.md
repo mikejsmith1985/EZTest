@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Smart priority-based file selection in `analyzeSourceDirectory`** — files are now scored and sorted by UI importance before the `maxFileCount` limit is applied, so the most valuable files (pages, routes, dashboards, login screens, forms) are always analyzed first instead of relying on arbitrary filesystem order.
+- **`--max-flows` CLI option on `eztest generate`** — caps the number of user flows to generate tests for (default: 10). GitHub Models free tier allows ~10 requests/minute; without this cap, 30+ flows generate 30+ sequential API calls and can take 15+ minutes to complete.
+- **`FLOW_MAPPING_BATCH_SIZE = 40` in `flowMapper.ts`** — all components are sent in one batch for flow generation (down from many small batches), dramatically reducing the number of API calls per run.
+- **`FLOW_GENERATION_SYSTEM_PROMPT`** — compact ~150-token system prompt specifically for the flow-mapping stage, replacing the full `BEHAVIORAL_QA_SYSTEM_PROMPT` (~875 tokens) that was causing GitHub Models 8K token limit failures when combined with 20+ component element lists.
+- **Quota exhaustion detection in `aiClient.ts`** — when GitHub Models returns a `retry-after` header greater than 5 minutes (indicating the daily free-tier quota is exhausted), EZTest immediately fails with an actionable error message. Previously would wait 23 hours.
+- **`hasRetryAfterHeader()` helper** — distinguishes between "no retry info" (use exponential backoff) and "quota exhausted" (fail fast with guidance).
+- **`MAX_RETRYABLE_DELAY_MS = 300_000`** — 5-minute ceiling for retry-after values; anything longer signals daily quota exhaustion.
+- **Extended `isTransientApiError`** to include GitHub Models 413 `tokens_limit_reached` as retryable.
+- **Smart priority-based file selection in `analyzeSourceDirectory`**— files are now scored and sorted by UI importance before the `maxFileCount` limit is applied, so the most valuable files (pages, routes, dashboards, login screens, forms) are always analyzed first instead of relying on arbitrary filesystem order.
   - New `scoreFileByImportance` function assigns scores 100–10 based on directory name (`pages`, `routes`, `views`, `screens`, `app`), exact component name (`Login`, `Dashboard`, `Cart`, etc.), filename suffix (`Page`, `Screen`, `Form`, `Modal`), and path depth.
   - New `calculatePathDepth` helper breaks ties within the same score tier by preferring shallower files.
 - **Extended glob exclude patterns** in `discoverSourceFiles` — Storybook stories, TypeScript declaration stubs, minified bundles, build output directories (`.next`, `build`, `out`, `vendor`, `.turbo`), and mock/fixture directories are now always excluded regardless of project config.
