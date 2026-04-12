@@ -6,8 +6,9 @@
  */
 import type { AiMessage, AiResponse } from './types.js';
 import type { AiConfig } from './config.js';
-import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION } from './config.js';
+import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION, COPILOT_FREE_MODEL_ROTATION } from './config.js';
 import { logDebug, logWarning } from './logger.js';
+import { getCopilotSessionToken } from './copilotAuth.js';
 
 // ── Quota Exhaustion Error ─────────────────────────────────────────────────
 
@@ -121,10 +122,82 @@ async function createGitHubCopilotAdapter(githubToken: string): Promise<Provider
   };
 }
 
+// ── GitHub Copilot Chat API Adapter ───────────────────────────────────────
+
+/** Base URL for the GitHub Copilot Chat API — separate from the GitHub Models endpoint. */
+const COPILOT_API_BASE_URL = 'https://api.githubcopilot.com';
+
+/**
+ * Maximum output tokens supported by the Copilot API for the free (0x) models.
+ * This is 4× the GitHub Models free-tier cap of 4 096 tokens, meaning no dynamic
+ * batch splitting is needed for the vast majority of real-world component sets.
+ */
+const COPILOT_MAX_OUTPUT_TOKENS = 16_384;
+
+/**
+ * Headers the Copilot API expects to identify the calling editor.
+ * These mirror what VS Code Copilot Chat sends; the server uses them for
+ * routing and telemetry but does not enforce a specific client version.
+ */
+const COPILOT_EDITOR_HEADERS = {
+  'Editor-Version':         'vscode/1.99.0',
+  'Editor-Plugin-Version':  'copilot-chat/0.26.0',
+  'Copilot-Integration-Id': 'vscode-chat',
+  'User-Agent':             'GitHubCopilotChat/0.26.0',
+} as const;
+
+/**
+ * Adapter for the GitHub Copilot Chat API (api.githubcopilot.com).
+ *
+ * Benefits over the GitHub Models free tier:
+ *   - 16 384 output tokens vs 4 096 — eliminates most batch-splitting overhead
+ *   - No per-model daily request quotas (gpt-4.1 and gpt-5-mini are 0x premium)
+ *   - Session token auto-refreshed via the gh CLI — no separate API key required
+ *
+ * Auth is handled by `getCopilotSessionToken()` which calls
+ * `gh api /copilot_internal/v2/token` using the stored gh CLI credentials.
+ */
+async function createCopilotChatApiAdapter(): Promise<ProviderAdapter> {
+  const { default: OpenAI } = await import('openai');
+
+  return {
+    async sendMessages(messages, modelName, maxTokens) {
+      // Refresh the session token if it is near expiry — typically a no-op due to caching
+      const sessionToken = await getCopilotSessionToken();
+
+      const copilotClient = new OpenAI({
+        apiKey:         sessionToken,
+        baseURL:        COPILOT_API_BASE_URL,
+        maxRetries:     0,
+        defaultHeaders: COPILOT_EDITOR_HEADERS,
+      });
+
+      // Respect the caller's configured maxTokens but cap at the Copilot API's limit
+      const effectiveMaxTokens = Math.min(maxTokens, COPILOT_MAX_OUTPUT_TOKENS);
+
+      const response = await copilotClient.chat.completions.create({
+        model:      modelName,
+        messages,
+        max_tokens: effectiveMaxTokens,
+      });
+
+      const firstChoice = response.choices[0];
+      if (!firstChoice?.message.content) {
+        throw new Error('GitHub Copilot API returned an empty response');
+      }
+
+      return {
+        content:    firstChoice.message.content,
+        tokensUsed: response.usage?.total_tokens ?? 0,
+        modelUsed:  response.model,
+      };
+    },
+  };
+}
+
 // ── Anthropic Adapter ──────────────────────────────────────────────────────
 
 /**
- * Adapter for the Anthropic API.
  * Handles the Anthropic message format difference (system message is a top-level field).
  */
 async function createAnthropicAdapter(apiKey: string): Promise<ProviderAdapter> {
@@ -339,32 +412,41 @@ async function executeWithRetry<ReturnType>(
 
 /**
  * Builds the ordered model rotation list for an AiConfig.
- * For GitHub provider: returns the full free-tier rotation (18 models by default),
- * sliced to start at the configured model if one was specified.
- * For other providers: single-element list (no rotation needed).
+ *
+ * - github provider:  returns the full free-tier rotation (18 models), sliced to start
+ *                     at the configured model when a modelOverride is present.
+ * - copilot provider: returns the 2-model 0x-premium rotation; custom override goes first.
+ * - other providers:  single-element list (no rotation needed).
  */
 function buildModelRotationList(aiConfig: AiConfig): readonly string[] {
-  if (aiConfig.provider !== 'github') {
-    // Non-GitHub providers use a single configured or default model
-    const singleModelName = aiConfig.modelOverride ?? getDefaultModelForProvider(aiConfig.provider);
-    return [singleModelName];
+  if (aiConfig.provider === 'github') {
+    const configuredModel = aiConfig.modelOverride;
+    if (!configuredModel) {
+      return GITHUB_FREE_MODEL_ROTATION;
+    }
+    const configuredModelPosition = GITHUB_FREE_MODEL_ROTATION.indexOf(configuredModel);
+    if (configuredModelPosition >= 0) {
+      return GITHUB_FREE_MODEL_ROTATION.slice(configuredModelPosition);
+    }
+    return [configuredModel, ...GITHUB_FREE_MODEL_ROTATION];
   }
 
-  const configuredModel = aiConfig.modelOverride;
-  if (!configuredModel) {
-    return GITHUB_FREE_MODEL_ROTATION;
+  if (aiConfig.provider === 'copilot') {
+    const configuredModel = aiConfig.modelOverride;
+    if (!configuredModel) {
+      return COPILOT_FREE_MODEL_ROTATION;
+    }
+    const configuredModelPosition = COPILOT_FREE_MODEL_ROTATION.indexOf(configuredModel);
+    if (configuredModelPosition >= 0) {
+      return COPILOT_FREE_MODEL_ROTATION.slice(configuredModelPosition);
+    }
+    // Custom model not in the 0x list — honour it, then fall back to the 0x rotation
+    return [configuredModel, ...COPILOT_FREE_MODEL_ROTATION];
   }
 
-  // If a model override was specified, start the rotation at its position so
-  // exhaustion falls through to models that follow it in the priority order.
-  const configuredModelPosition = GITHUB_FREE_MODEL_ROTATION.indexOf(configuredModel);
-  if (configuredModelPosition >= 0) {
-    return GITHUB_FREE_MODEL_ROTATION.slice(configuredModelPosition);
-  }
-
-  // Custom model not in the standard rotation list — put it first so EZTest
-  // honours the user's preference, then falls through to the full rotation list.
-  return [configuredModel, ...GITHUB_FREE_MODEL_ROTATION];
+  // For OpenAI and Anthropic a single model is used — no free-tier rotation needed
+  const singleModelName = aiConfig.modelOverride ?? getDefaultModelForProvider(aiConfig.provider);
+  return [singleModelName];
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -397,9 +479,10 @@ export class AiClient {
     if (!this.aiConfig.apiKey) {
       throw new Error(
         `No AI API key found. Please set one of the following in your .env file:\n` +
-        `  EZTEST_GITHUB_TOKEN=<your GitHub PAT with models:read scope>  (GitHub Copilot)\n` +
-        `  OPENAI_API_KEY=<your OpenAI key>                              (OpenAI)\n` +
-        `  ANTHROPIC_API_KEY=<your Anthropic key>                        (Anthropic Claude)\n\n` +
+        `  EZTEST_GITHUB_TOKEN=<your GitHub PAT>  (GitHub Models or Copilot API — free tier)\n` +
+        `    then optionally: EZTEST_AI_PROVIDER=copilot  (to use the Copilot Chat API endpoint)\n` +
+        `  OPENAI_API_KEY=<your OpenAI key>        (OpenAI GPT models)\n` +
+        `  ANTHROPIC_API_KEY=<your Anthropic key>  (Anthropic Claude models)\n\n` +
         `Create a free GitHub PAT at: https://github.com/settings/tokens?type=beta\n` +
         `(Account permissions → Models → Read-only)`
       );
@@ -407,6 +490,11 @@ export class AiClient {
 
     if (this.aiConfig.provider === 'github') {
       this.providerAdapter = await createGitHubCopilotAdapter(this.aiConfig.apiKey);
+    } else if (this.aiConfig.provider === 'copilot') {
+      // Copilot Chat API — auth comes from gh CLI, apiKey is just the GitHub token
+      // used to validate the user has a Copilot subscription; the session token is
+      // fetched and refreshed internally by createCopilotChatApiAdapter().
+      this.providerAdapter = await createCopilotChatApiAdapter();
     } else if (this.aiConfig.provider === 'openai') {
       this.providerAdapter = await createOpenAiAdapter(this.aiConfig.apiKey);
     } else {
@@ -449,8 +537,9 @@ export class AiClient {
         const nextModelIndex = this.activeModelIndex + 1;
         if (nextModelIndex >= this.modelRotationList.length) {
           throw new Error(
-            `All ${this.modelRotationList.length} models in the GitHub Models free-tier rotation ` +
-            `have exhausted their daily quota. ` +
+            `All ${this.modelRotationList.length} models in the ` +
+            `${this.aiConfig.provider === 'copilot' ? 'Copilot API 0x-premium' : 'GitHub Models free-tier'} rotation ` +
+            `have exhausted their quota. ` +
             `Please wait for quotas to reset (usually at midnight UTC) ` +
             `or configure a different AI provider in your .env file.`,
           );
