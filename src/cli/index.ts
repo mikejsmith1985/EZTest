@@ -14,6 +14,10 @@
  *   7. eztest replay     — Run the autonomous reproduce → fix → validate loop from a bug report
  *   8. eztest ui         — Launch the browser-based wizard (no terminal knowledge required)
  */
+
+// Load .env before any other import so every module sees the correct process.env values.
+import 'dotenv/config';
+
 import { Command } from 'commander';
 import { registerInitCommand }      from './commands/init.js';
 import { registerGenerateCommand }  from './commands/generate.js';

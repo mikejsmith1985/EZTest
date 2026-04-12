@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Blank page on launch** — unescaped apostrophe in handleRecord's description string (pp's) caused a JavaScript syntax error that silently crashed the entire script block before the page could render; fixed by changing the string delimiter to double quotes
+- **GitHub Copilot not detected in UI** — dotenv was installed but never called, so .env was never loaded and process.env.EZTEST_GITHUB_TOKEN was always undefined; added import 'dotenv/config' as the very first import in src/cli/index.ts so every module sees the correct environment values on startup
+
 ### Changed
 - **Complete UI overhaul — EZTest is now an application, not a wizard** — replaced the 4-step wizard with a full app-style interface: persistent app bar with project pill, dashboard with 3 plain-English action cards, native Windows folder picker, and an auto-showing onboarding overlay on first launch (just like any well-designed app)
   - **No typing required** — folder picker and file picker dialogs open natively via Windows Forms; URL fields are pre-filled from the last session
