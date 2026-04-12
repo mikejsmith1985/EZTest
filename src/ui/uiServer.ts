@@ -397,19 +397,28 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
 
   // ── POST /api/browse-folder — opens native Windows folder picker ──────────
   // Uses PowerShell's WinForms FolderBrowserDialog — no SDK required on Windows.
+  // A hidden topmost Form is used as the dialog owner so it appears in front of
+  // the browser window instead of hidden behind it.
   expressApp.post('/api/browse-folder', (_req, res) => {
     const psCommand = [
       'Add-Type -AssemblyName System.Windows.Forms;',
+      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
+      // Create an invisible topmost owner window so the dialog surfaces above the browser.
+      '$owner = New-Object System.Windows.Forms.Form;',
+      '$owner.TopMost = $true;',
+      '$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen;',
+      '$owner.Width = 0; $owner.Height = 0; $owner.ShowInTaskbar = $false;',
+      '$owner.Show();',
       '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
       '$d.Description = "Select your project root folder";',
       '$d.ShowNewFolderButton = $false;',
-      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+      'if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+      '$owner.Dispose();',
     ].join(' ');
 
     const pickerProcess = spawn(
       'powershell',
-      ['-Sta', '-NoProfile', '-NonInteractive', '-Command', psCommand],
+      ['-Sta', '-NoProfile', '-Command', psCommand],
       { stdio: ['ignore', 'pipe', 'ignore'], shell: false },
     );
 
@@ -431,22 +440,29 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
   });
 
   // ── POST /api/browse-file — opens native Windows file picker ─────────────
+  // Same topmost-owner pattern as browse-folder so the dialog appears in front.
   expressApp.post('/api/browse-file', (req, res) => {
     const { filter = 'All files|*.*' } = req.body as { filter?: string };
     const safeFilter = filter.replace(/'/g, '');
 
     const psCommand = [
       'Add-Type -AssemblyName System.Windows.Forms;',
+      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
+      '$owner = New-Object System.Windows.Forms.Form;',
+      '$owner.TopMost = $true;',
+      '$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen;',
+      '$owner.Width = 0; $owner.Height = 0; $owner.ShowInTaskbar = $false;',
+      '$owner.Show();',
       '$d = New-Object System.Windows.Forms.OpenFileDialog;',
       '$d.Title = "Select a file";',
       '$d.Filter = \'' + safeFilter + '\';',
-      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
-      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
+      'if ($d.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
+      '$owner.Dispose();',
     ].join(' ');
 
     const pickerProcess = spawn(
       'powershell',
-      ['-Sta', '-NoProfile', '-NonInteractive', '-Command', psCommand],
+      ['-Sta', '-NoProfile', '-Command', psCommand],
       { stdio: ['ignore', 'pipe', 'ignore'], shell: false },
     );
 
