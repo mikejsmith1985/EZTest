@@ -13,6 +13,7 @@
   ],
   "scripts": {
     "build": "tsc",
+    "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File launcher/build.ps1",
     "prepublishOnly": "npm run build",
     "dev": "tsx src/cli/index.ts",
     "test": "playwright test",
