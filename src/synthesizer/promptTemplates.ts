@@ -365,6 +365,76 @@ Output ONLY the corrected TypeScript test file. No explanation outside the inlin
   ];
 }
 
+// ── Test Regeneration Prompt ───────────────────────────────────────────────
+
+/**
+ * Builds the prompt for regenerating a test that failed during the run-and-fix pass.
+ *
+ * When EZTest runs generated tests immediately after creation and a test fails,
+ * this prompt asks the AI to diagnose whether the failure is:
+ * a) A locator/selector problem (the AI guessed wrong element names) — fix the test
+ * b) A genuine missing feature/bug in the app — keep the test failing, add a comment
+ *
+ * Regeneration preserves the BEHAVIORAL intent of the original test while fixing
+ * the mechanical issue of selectors that don't match the actual DOM.
+ *
+ * @param userFlow - The original user flow the test was generated for
+ * @param failingTestCode - The test code that failed
+ * @param playwrightErrorOutput - Raw output from the Playwright test run
+ * @param targetAppUrl - The URL the tests run against
+ * @param appSpec - Optional app spec for additional context
+ */
+export function buildTestRegenerationPrompt(
+  userFlow: UserFlow,
+  failingTestCode: string,
+  playwrightErrorOutput: string,
+  targetAppUrl: string,
+  appSpec?: string,
+): AiMessage[] {
+  // Truncate the error output to keep token usage bounded
+  const truncatedErrorOutput = playwrightErrorOutput.slice(0, 3000);
+
+  return [
+    {
+      role: 'system',
+      content: BEHAVIORAL_QA_SYSTEM_PROMPT,
+    },
+    {
+      role: 'user',
+      content: `A Playwright test you generated has FAILED. Diagnose why and fix it.
+${formatAppSpecSection(appSpec)}
+ORIGINAL FLOW: ${userFlow.flowName} (${userFlow.flowKind})
+TARGET URL: ${targetAppUrl}
+
+WHAT THE FLOW IS TESTING:
+${userFlow.steps.map((step, index) => `${index + 1}. ${step.actionDescription}\n   Expected: ${step.expectedOutcome}`).join('\n')}
+
+FAILING TEST CODE:
+\`\`\`typescript
+${failingTestCode}
+\`\`\`
+
+PLAYWRIGHT ERROR OUTPUT:
+\`\`\`
+${truncatedErrorOutput}
+\`\`\`
+
+DIAGNOSIS RULES:
+1. If the error is "locator not found" or "element not visible" → the selector guessed wrong. Fix by:
+   - Use more flexible text matchers: getByText('partial text', { exact: false })
+   - Try getByRole with a broader role type
+   - Try getByTestId if a data-testid attribute might exist
+   - Add await page.waitForLoadState('networkidle') before the first interaction if navigation is involved
+2. If the error is "page.goto timed out" → the app may not be running; add a comment but keep the test
+3. If the error is a genuine assertion failure (element exists but shows wrong text) → this is a REAL BUG. Do NOT change the assertion. Add a comment: // TODO: This test reveals a bug — [describe what should happen]
+4. NEVER weaken an assertion to make it pass (e.g., don't change .toHaveText('Exact text') to .toBeVisible() just to avoid failure)
+5. NEVER add page.waitForTimeout() — fix the root cause instead
+
+Output ONLY the corrected TypeScript test file. No markdown fences, no explanation outside inline comments.`,
+    },
+  ];
+}
+
 // ── Bug Reproduction Prompt ────────────────────────────────────────────────
 
 /**

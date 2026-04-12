@@ -1,13 +1,14 @@
 /**
  * The `eztest generate` command.
  *
- * Orchestrates the full Phase 1 synthesis pipeline:
+ * Orchestrates the full AI Test Synthesizer pipeline:
  * 1. Reads source code from the target directory
  * 2. Auto-detects or reads an app spec (README/eztest-spec.md) for business context
  * 3. Analyzes components with the CodeAnalyzer
  * 4. Maps components to user flows with the FlowMapper
  * 5. Generates Playwright test files with the TestGenerator
  * 6. Optionally runs a second behavioral assertion review pass
+ * 7. Optionally runs the tests immediately and fixes failing tests via regeneration
  *
  * Usage: eztest generate --source ./src --url http://localhost:3000 --output ./tests/e2e
  */
@@ -17,7 +18,10 @@ import { AiClient } from '../../shared/aiClient.js';
 import { logInfo, logSuccess, logError, logWarning, enableVerboseLogging } from '../../shared/logger.js';
 import { analyzeSourceDirectory } from '../../synthesizer/codeAnalyzer.js';
 import { mapComponentAnalysesToUserFlows } from '../../synthesizer/flowMapper.js';
-import { generateTestsForFlows } from '../../synthesizer/testGenerator.js';
+import {
+  generateTestsForFlows,
+  runAndFixGeneratedTests,
+} from '../../synthesizer/testGenerator.js';
 import { detectAndReadAppSpec, readAppSpecFromFile } from '../../synthesizer/appSpecReader.js';
 
 /** Maximum components to analyze per run — prevents runaway API costs. */
@@ -73,6 +77,15 @@ export function registerGenerateCommand(program: Command): void {
       'Skip the behavioral assertion review pass (saves API calls but may let code-level assertions through)',
     )
     .option(
+      '--run-and-fix',
+      'After generating tests, immediately run them and attempt to fix any that fail by sending errors back to AI. ' +
+      'Fixes selector mismatches; tests that still fail likely reveal real bugs and are left as red tests.',
+    )
+    .option(
+      '--working-dir <path>',
+      'Project root to run Playwright from during --run-and-fix (defaults to current directory)',
+    )
+    .option(
       '--dry-run',
       'Generate tests but print to stdout instead of writing files',
     )
@@ -89,6 +102,8 @@ export function registerGenerateCommand(program: Command): void {
       deepAnalysis: boolean;
       spec?: string;
       review: boolean;
+      runAndFix: boolean;
+      workingDir?: string;
       dryRun: boolean;
       verbose: boolean;
     }) => {
@@ -207,6 +222,50 @@ export function registerGenerateCommand(program: Command): void {
         process.exit(1);
       }
 
+      // ── Stage 5 (optional): Run tests and fix failures ────────────────
+      // When --run-and-fix is set and we actually wrote files, run the tests
+      // immediately. Failing tests are sent back to AI for diagnosis and
+      // regeneration. Tests that survive two regeneration attempts are left
+      // as-is — they likely reveal real behavioral bugs, which is valuable.
+      if (commandOptions.runAndFix && !commandOptions.dryRun && generationResult.generatedFiles.length > 0) {
+        logInfo('\n── Run-and-Fix pass ──────────────────────────────────────────────');
+        logInfo('Running generated tests and attempting to fix any selector failures...');
+
+        let fixResult;
+        try {
+          fixResult = await runAndFixGeneratedTests(generationResult.generatedFiles, {
+            targetAppUrl: commandOptions.url,
+            outputDirectory: commandOptions.output,
+            aiClient,
+            appSpec: appSpec ?? undefined,
+            workingDirectory: commandOptions.workingDir,
+          });
+        } catch (fixError) {
+          logWarning(`Run-and-fix pass failed unexpectedly: ${String(fixError)}`);
+          logWarning('Your generated tests are still on disk. Run them manually with: npx playwright test ' + commandOptions.output);
+          fixResult = null;
+        }
+
+        if (fixResult) {
+          console.log('');
+          logInfo('── Run-and-Fix Summary ───────────────────────────────────────────');
+          logSuccess(`  ✓ Passed on first run:  ${fixResult.passedOnFirstRunCount}`);
+          if (fixResult.fixedByRegenerationCount > 0) {
+            logSuccess(`  ✓ Fixed by regeneration: ${fixResult.fixedByRegenerationCount}`);
+          }
+          if (fixResult.stillFailingCount > 0) {
+            const genuineBugCount = fixResult.fileOutcomes.filter(outcome => outcome.outcome === 'likely-genuine-bug').length;
+            if (genuineBugCount > 0) {
+              logWarning(`  ⚑ Likely reveals bugs:   ${genuineBugCount} (left as red tests — these are valuable!)`);
+            }
+            const truelyStillFailing = fixResult.stillFailingCount - genuineBugCount;
+            if (truelyStillFailing > 0) {
+              logWarning(`  ✗ Still failing:         ${truelyStillFailing} (check verbose output for details)`);
+            }
+          }
+        }
+      }
+
       // ── Summary ──
       console.log('');
       logSuccess(`Done! Generated ${generationResult.generatedFiles.length} test files`);
@@ -222,8 +281,9 @@ export function registerGenerateCommand(program: Command): void {
           console.log(`\n// ─── ${generatedFile.suggestedOutputPath} ───`);
           console.log(generatedFile.testSourceCode);
         }
-      } else {
+      } else if (!commandOptions.runAndFix) {
         logInfo(`\nRun your tests with: npx playwright test ${commandOptions.output}`);
+        logInfo(`Tip: Use --run-and-fix next time to automatically fix selector failures after generation.`);
       }
     });
 }

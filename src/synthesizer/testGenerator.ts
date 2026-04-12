@@ -14,8 +14,16 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import type { UserFlow, GeneratedTestFile } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
-import { buildTestCodeGenerationPrompt, buildAssertionReviewPrompt } from './promptTemplates.js';
+import {
+  buildTestCodeGenerationPrompt,
+  buildAssertionReviewPrompt,
+  buildTestRegenerationPrompt,
+} from './promptTemplates.js';
 import { logDebug, logInfo, logWarning, logSuccess } from '../shared/logger.js';
+import {
+  runGeneratedTestFiles,
+  type GeneratedTestSuiteResult,
+} from './generatedTestRunner.js';
 
 // ── File Name Generation ───────────────────────────────────────────────────
 
@@ -244,5 +252,259 @@ export async function generateTestsForFlows(
     generatedFiles,
     failedFlowCount,
     totalAssertionCount,
+  };
+}
+
+// ── Run-and-Fix Feedback Loop ──────────────────────────────────────────────
+
+/**
+ * Maximum number of regeneration attempts per failing test file.
+ * Two passes is enough for selector issues without risking infinite loops.
+ * If a test still fails after two regeneration attempts, it likely reveals
+ * a genuine bug or missing feature — leave it as-is.
+ */
+const MAX_REGENERATION_ATTEMPTS = 2;
+
+/** Options for the run-and-fix pass. */
+export interface RunAndFixOptions {
+  targetAppUrl: string;
+  outputDirectory: string;
+  aiClient: AiClient;
+  appSpec?: string;
+  /**
+   * Working directory to run Playwright from.
+   * Should be the root of the user's project (where their playwright.config.ts lives).
+   * Defaults to process.cwd().
+   */
+  workingDirectory?: string;
+}
+
+/** The outcome of the run-and-fix pass for a single test file. */
+export interface TestFileFixResult {
+  testFilePath: string;
+  fileName: string;
+  /** How the file ended up: passed on first run, fixed after regen, or still failing. */
+  outcome: 'passed' | 'fixed' | 'still-failing' | 'likely-genuine-bug';
+  /** Number of regeneration attempts made (0 if passed on first try). */
+  regenerationAttemptCount: number;
+}
+
+/** Summary of the entire run-and-fix pass. */
+export interface RunAndFixResult {
+  suiteResult: GeneratedTestSuiteResult;
+  fileOutcomes: TestFileFixResult[];
+  /** Files that passed on the first run (no fixing needed). */
+  passedOnFirstRunCount: number;
+  /** Files that were fixed by regeneration. */
+  fixedByRegenerationCount: number;
+  /** Files that still fail after max regeneration attempts. */
+  stillFailingCount: number;
+}
+
+/**
+ * Attempts to regenerate a single failing test by sending the error back to AI.
+ *
+ * The AI diagnoses whether the failure is a locator/selector mismatch (fixable)
+ * or a genuine behavioral mismatch (a real bug — leave failing as documentation).
+ * Returns null if regeneration produces invalid code.
+ */
+async function regenerateFailingTestFile(
+  generatedFile: GeneratedTestFile,
+  errorOutput: string,
+  targetAppUrl: string,
+  aiClient: AiClient,
+  appSpec: string | undefined,
+): Promise<GeneratedTestFile | null> {
+  logDebug(`  Regenerating test for "${generatedFile.sourceFlow.flowName}"...`);
+
+  const regenMessages = buildTestRegenerationPrompt(
+    generatedFile.sourceFlow,
+    generatedFile.testSourceCode,
+    errorOutput,
+    targetAppUrl,
+    appSpec,
+  );
+
+  let aiResponse;
+  try {
+    aiResponse = await aiClient.chat(regenMessages, `regenerate: ${generatedFile.sourceFlow.flowName}`);
+  } catch (callError) {
+    logWarning(`AI regeneration call failed for "${generatedFile.sourceFlow.flowName}": ${String(callError)}`);
+    return null;
+  }
+
+  const regenCode = sanitizeGeneratedTestCode(aiResponse.content);
+
+  // Only accept the regenerated version if it's still valid Playwright test code
+  if (!regenCode.includes('import') || (!regenCode.includes('test(') && !regenCode.includes('it('))) {
+    logWarning(`Regenerated code for "${generatedFile.sourceFlow.flowName}" is not valid Playwright tests — keeping original`);
+    return null;
+  }
+
+  return {
+    ...generatedFile,
+    testSourceCode: regenCode,
+    assertionSummary: extractAssertionSummary(regenCode),
+  };
+}
+
+/**
+ * Runs all generated test files, then attempts to fix any that fail by sending
+ * the Playwright error back to AI for diagnosis and regeneration.
+ *
+ * This is the key feedback loop that closes the gap between "AI-generated tests"
+ * and "tests that actually run". Most first-pass failures are selector mismatches
+ * (the AI guessed `getByRole('button', { name: 'Submit' })` but the actual button
+ * says 'Save Changes'). The AI can fix these trivially when it sees the error.
+ *
+ * Tests that still fail after MAX_REGENERATION_ATTEMPTS likely reveal genuine
+ * behavioral bugs — they are left as-is (red tests) which is the correct outcome.
+ *
+ * @param generatedFiles - The files to run and fix (must already be written to disk)
+ * @param options - Configuration for running and AI regeneration
+ */
+export async function runAndFixGeneratedTests(
+  generatedFiles: GeneratedTestFile[],
+  options: RunAndFixOptions,
+): Promise<RunAndFixResult> {
+  const {
+    targetAppUrl,
+    outputDirectory,
+    aiClient,
+    appSpec,
+    workingDirectory = process.cwd(),
+  } = options;
+
+  if (generatedFiles.length === 0) {
+    return {
+      suiteResult: {
+        passedFileCount: 0,
+        failedFileCount: 0,
+        totalFileCount: 0,
+        fileResults: [],
+        failedFiles: [],
+      },
+      fileOutcomes: [],
+      passedOnFirstRunCount: 0,
+      fixedByRegenerationCount: 0,
+      stillFailingCount: 0,
+    };
+  }
+
+  const absoluteTestPaths = generatedFiles.map(file => resolve(file.suggestedOutputPath));
+
+  // ── First run: establish baseline pass/fail ────────────────────────────
+  const initialSuiteResult = await runGeneratedTestFiles(absoluteTestPaths, workingDirectory);
+
+  const fileOutcomes: TestFileFixResult[] = [];
+  let fixedByRegenerationCount = 0;
+  let stillFailingCount = 0;
+
+  // ── Regeneration loop for failed files ────────────────────────────────
+  for (const failedFileResult of initialSuiteResult.failedFiles) {
+    // Find the corresponding GeneratedTestFile object to pass to the AI
+    const originalGeneratedFile = generatedFiles.find(
+      file => resolve(file.suggestedOutputPath) === failedFileResult.testFilePath,
+    );
+
+    if (!originalGeneratedFile) {
+      logWarning(`Could not find generated file record for ${failedFileResult.fileName} — skipping regeneration`);
+      fileOutcomes.push({
+        testFilePath: failedFileResult.testFilePath,
+        fileName: failedFileResult.fileName,
+        outcome: 'still-failing',
+        regenerationAttemptCount: 0,
+      });
+      stillFailingCount++;
+      continue;
+    }
+
+    logInfo(`\nAttempting to fix: ${failedFileResult.fileName}`);
+
+    let currentTestFile = originalGeneratedFile;
+    let currentErrorOutput = failedFileResult.errorSummary;
+    let wasFixed = false;
+    let attemptCount = 0;
+
+    // Regeneration loop — try up to MAX_REGENERATION_ATTEMPTS times
+    for (let attemptNumber = 1; attemptNumber <= MAX_REGENERATION_ATTEMPTS; attemptNumber++) {
+      attemptCount = attemptNumber;
+
+      const regeneratedFile = await regenerateFailingTestFile(
+        currentTestFile,
+        currentErrorOutput,
+        targetAppUrl,
+        aiClient,
+        appSpec,
+      );
+
+      if (!regeneratedFile) {
+        logWarning(`  Attempt ${attemptNumber}: Regeneration produced no valid code`);
+        break;
+      }
+
+      // Write the regenerated code to disk and re-run to see if it passes now
+      writeFileSync(resolve(regeneratedFile.suggestedOutputPath), regeneratedFile.testSourceCode, 'utf-8');
+      logDebug(`  Attempt ${attemptNumber}: Wrote regenerated test, re-running...`);
+
+      const rerunResult = await runGeneratedTestFiles([regeneratedFile.suggestedOutputPath], workingDirectory);
+
+      if (rerunResult.passedFileCount === 1) {
+        logSuccess(`  ✓ Fixed after ${attemptNumber} attempt${attemptNumber > 1 ? 's' : ''}: ${failedFileResult.fileName}`);
+        currentTestFile = regeneratedFile;
+        wasFixed = true;
+        break;
+      }
+
+      // Still failing — update for next attempt with fresh error output
+      logDebug(`  Attempt ${attemptNumber}: Still failing, trying again...`);
+      const rerunFailedResult = rerunResult.failedFiles[0];
+      currentErrorOutput = rerunFailedResult?.errorSummary ?? currentErrorOutput;
+      currentTestFile = regeneratedFile;
+    }
+
+    if (wasFixed) {
+      fixedByRegenerationCount++;
+      fileOutcomes.push({
+        testFilePath: failedFileResult.testFilePath,
+        fileName: failedFileResult.fileName,
+        outcome: 'fixed',
+        regenerationAttemptCount: attemptCount,
+      });
+    } else {
+      stillFailingCount++;
+      // A test that survives MAX_REGENERATION_ATTEMPTS likely reveals a real behavioral gap
+      const isLikelyGenuineBug = attemptCount >= MAX_REGENERATION_ATTEMPTS;
+      const outcome = isLikelyGenuineBug ? 'likely-genuine-bug' : 'still-failing';
+
+      if (isLikelyGenuineBug) {
+        logWarning(`  ⚑ ${failedFileResult.fileName} — may reveal a real behavioral bug. Keeping as a red test.`);
+      }
+
+      fileOutcomes.push({
+        testFilePath: failedFileResult.testFilePath,
+        fileName: failedFileResult.fileName,
+        outcome,
+        regenerationAttemptCount: attemptCount,
+      });
+    }
+  }
+
+  // Add outcomes for files that passed on the first run
+  for (const passedFile of initialSuiteResult.fileResults.filter(result => result.didPass)) {
+    fileOutcomes.push({
+      testFilePath: passedFile.testFilePath,
+      fileName: passedFile.fileName,
+      outcome: 'passed',
+      regenerationAttemptCount: 0,
+    });
+  }
+
+  return {
+    suiteResult: initialSuiteResult,
+    fileOutcomes,
+    passedOnFirstRunCount: initialSuiteResult.passedFileCount,
+    fixedByRegenerationCount,
+    stillFailingCount,
   };
 }

@@ -35,6 +35,10 @@ interface RunConfig {
   url?: string;
   output?: string;
   report?: string;
+  /** Whether to run tests after generation and auto-fix selector failures. */
+  runAndFix?: boolean;
+  /** Whether to skip the behavioral assertion review pass. */
+  noReview?: boolean;
 }
 
 /** Log severity levels understood by the wizard terminal pane. */
@@ -103,9 +107,11 @@ function buildCliArgsForWorkflow(runConfig: RunConfig): string[] {
   const cliArgs: string[] = [runConfig.workflow];
 
   if (runConfig.workflow === 'generate') {
-    if (runConfig.source) { cliArgs.push('--source', runConfig.source); }
-    if (runConfig.url)    { cliArgs.push('--url',    runConfig.url);    }
-    if (runConfig.output) { cliArgs.push('--output', runConfig.output); }
+    if (runConfig.source)     { cliArgs.push('--source', runConfig.source); }
+    if (runConfig.url)        { cliArgs.push('--url',    runConfig.url);    }
+    if (runConfig.output)     { cliArgs.push('--output', runConfig.output); }
+    if (runConfig.runAndFix)  { cliArgs.push('--run-and-fix'); }
+    if (runConfig.noReview)   { cliArgs.push('--no-review'); }
 
   } else if (runConfig.workflow === 'record') {
     if (runConfig.url)    { cliArgs.push('--url',    runConfig.url);    }

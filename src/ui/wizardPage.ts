@@ -216,6 +216,21 @@ export function buildWizardPageHtml(): string {
       transition: border-color 0.2s;
     }
     .config-field input:focus { border-color: ${COLOR_ACCENT}; }
+    .config-checkbox label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: ${COLOR_TEXT_MUTED};
+    }
+    .config-checkbox input[type="checkbox"] {
+      width: auto;
+      border: none;
+      padding: 0;
+      accent-color: ${COLOR_ACCENT};
+      cursor: pointer;
+    }
 
     /* ── Buttons ── */
     .btn {
@@ -592,7 +607,9 @@ export function buildWizardPageHtml(): string {
         fieldsContainer.innerHTML =
           buildTextField('configSource', 'Source Directory', './src', '') +
           buildTextField('configUrl',    'Application URL',  'http://localhost:3000', '') +
-          buildTextField('configOutput', 'Output Directory', './tests/generated', '');
+          buildTextField('configOutput', 'Output Directory', './tests/generated', '') +
+          buildCheckbox('configRunAndFix', 'Run tests after generation and auto-fix selector failures (recommended)', true) +
+          buildCheckbox('configNoReview',  'Skip behavioral assertion review pass (faster, fewer API calls)', false);
 
       } else if (selectedWorkflow === 'record') {
         titleEl.textContent = 'Configure: Record Session';
@@ -617,6 +634,15 @@ export function buildWizardPageHtml(): string {
         + '</div>';
     }
 
+    function buildCheckbox(fieldId, labelText, isChecked) {
+      return '<div class="config-field config-checkbox">'
+        + '<label>'
+        + '<input type="checkbox" id="' + fieldId + '"' + (isChecked ? ' checked' : '') + ' />'
+        + ' ' + labelText
+        + '</label>'
+        + '</div>';
+    }
+
     // ── Step 4: Start run ─────────────────────────────────────────────────────
 
     function startRun() {
@@ -626,15 +652,19 @@ export function buildWizardPageHtml(): string {
 
       var config = { workflow: selectedWorkflow };
 
-      var sourceEl  = document.getElementById('configSource');
-      var urlEl     = document.getElementById('configUrl');
-      var outputEl  = document.getElementById('configOutput');
-      var reportEl  = document.getElementById('configReport');
+      var sourceEl       = document.getElementById('configSource');
+      var urlEl          = document.getElementById('configUrl');
+      var outputEl       = document.getElementById('configOutput');
+      var reportEl       = document.getElementById('configReport');
+      var runAndFixEl    = document.getElementById('configRunAndFix');
+      var noReviewEl     = document.getElementById('configNoReview');
 
-      if (sourceEl)  { config.source  = sourceEl.value; }
-      if (urlEl)     { config.url     = urlEl.value; }
-      if (outputEl)  { config.output  = outputEl.value; }
-      if (reportEl)  { config.report  = reportEl.value; }
+      if (sourceEl)    { config.source    = sourceEl.value; }
+      if (urlEl)       { config.url       = urlEl.value; }
+      if (outputEl)    { config.output    = outputEl.value; }
+      if (reportEl)    { config.report    = reportEl.value; }
+      if (runAndFixEl) { config.runAndFix = runAndFixEl.checked; }
+      if (noReviewEl)  { config.noReview  = noReviewEl.checked; }
 
       socket.emit('run:start', config);
     }
