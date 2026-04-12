@@ -77,12 +77,16 @@ function parseAiJsonResponse<ParsedType>(
 /**
  * Uses AI to analyze a single component and understand its user-facing purpose.
  * Returns a structured description of what users can do with this component.
+ *
+ * @param appSpec - Optional plain-English app description injected into the prompt
+ *   so the AI understands the business context while analyzing the component.
  */
 async function analyzeComponentIntent(
   componentAnalysis: ComponentAnalysis,
   aiClient: AiClient,
+  appSpec?: string,
 ): Promise<ComponentIntentResponse | null> {
-  const promptMessages = buildComponentIntentPrompt(componentAnalysis);
+  const promptMessages = buildComponentIntentPrompt(componentAnalysis, appSpec);
 
   const aiResponse = await aiClient.chat(
     promptMessages,
@@ -133,6 +137,13 @@ export interface FlowMapperOptions {
    * More thorough but uses more AI tokens. Recommended for complex apps.
    */
   shouldAnalyzeIndividualComponents: boolean;
+  /**
+   * Optional plain-English description of what the application is designed to do.
+   * Auto-detected from eztest-spec.md, README.md, or AGENTS.md when not provided.
+   * This is the single biggest quality lever — it gives the AI the business
+   * intent of the app, not just a mechanical reading of the source code.
+   */
+  appSpec?: string;
 }
 
 /**
@@ -146,7 +157,7 @@ export async function mapComponentAnalysesToUserFlows(
   aiClient: AiClient,
   options: FlowMapperOptions,
 ): Promise<UserFlow[]> {
-  const { targetAppUrl, shouldAnalyzeIndividualComponents } = options;
+  const { targetAppUrl, shouldAnalyzeIndividualComponents, appSpec } = options;
 
   // Optionally run per-component intent analysis to enrich the context
   // This helps the flow generation prompt produce better-connected journeys
@@ -154,7 +165,8 @@ export async function mapComponentAnalysesToUserFlows(
     logDebug(`Running per-component intent analysis for ${componentAnalyses.length} components...`);
 
     for (const componentAnalysis of componentAnalyses) {
-      const intent = await analyzeComponentIntent(componentAnalysis, aiClient);
+      // Pass the app spec so per-component analysis understands the business context
+      const intent = await analyzeComponentIntent(componentAnalysis, aiClient, appSpec);
       if (intent) {
         // Attach the inferred purpose to each component's route path for context
         componentAnalysis.routePath = componentAnalysis.routePath ?? intent.requiredSetup;
@@ -166,7 +178,8 @@ export async function mapComponentAnalysesToUserFlows(
   // Generate the complete set of user flows from the full component picture
   logDebug(`Generating user flows from ${componentAnalyses.length} components...`);
 
-  const flowGenerationMessages = buildUserFlowGenerationPrompt(componentAnalyses, targetAppUrl);
+  // Pass the app spec to give the AI business intent alongside mechanical code analysis
+  const flowGenerationMessages = buildUserFlowGenerationPrompt(componentAnalyses, targetAppUrl, appSpec);
   const flowGenerationResponse = await aiClient.chat(
     flowGenerationMessages,
     'user flow generation',

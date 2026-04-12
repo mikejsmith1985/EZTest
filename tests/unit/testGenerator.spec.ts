@@ -76,7 +76,12 @@ test.describe('generateTestsForFlows — file naming', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow({ flowName: 'User completes checkout' })],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: outputDir, shouldWriteFilesToDisk: false },
+      {
+        targetAppUrl: 'http://localhost:3000',
+        outputDirectory: outputDir,
+        shouldWriteFilesToDisk: false,
+        shouldReviewAssertions: false,
+      },
     );
 
     expect(result.generatedFiles[0].suggestedOutputPath).toContain('user-completes-checkout');
@@ -89,7 +94,7 @@ test.describe('generateTestsForFlows — file naming', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow({ flowName: 'User submits form with "special" chars & symbols!' })],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     const fileName = result.generatedFiles[0].suggestedOutputPath;
@@ -107,7 +112,7 @@ test.describe('generateTestsForFlows — code sanitization', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow()],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     expect(result.generatedFiles[0].testSourceCode).not.toContain('```');
@@ -121,7 +126,7 @@ test.describe('generateTestsForFlows — code sanitization', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow()],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     expect(result.generatedFiles).toHaveLength(0);
@@ -136,7 +141,7 @@ test.describe('generateTestsForFlows — assertion extraction', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow()],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     // The sample test has two expect().toBeVisible() calls
@@ -151,7 +156,7 @@ test.describe('generateTestsForFlows — assertion extraction', () => {
     const result = await generateTestsForFlows(
       twoFlows,
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     expect(result.totalAssertionCount).toBeGreaterThan(0);
@@ -166,7 +171,7 @@ test.describe('generateTestsForFlows — file writing', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow()],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: outputDir, shouldWriteFilesToDisk: true },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: outputDir, shouldWriteFilesToDisk: true, shouldReviewAssertions: false },
     );
 
     const writtenFilePath = resolve(result.generatedFiles[0].suggestedOutputPath);
@@ -183,7 +188,7 @@ test.describe('generateTestsForFlows — file writing', () => {
     const result = await generateTestsForFlows(
       [createMockUserFlow()],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: outputDir, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: outputDir, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     expect(result.generatedFiles).toHaveLength(1);
@@ -196,7 +201,7 @@ test.describe('generateTestsForFlows — file writing', () => {
     const result = await generateTestsForFlows(
       [],
       mockAiClient,
-      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false },
+      { targetAppUrl: 'http://localhost:3000', outputDirectory: testTemporaryDirectory, shouldWriteFilesToDisk: false, shouldReviewAssertions: false },
     );
 
     expect(result.generatedFiles).toHaveLength(0);
@@ -204,3 +209,4 @@ test.describe('generateTestsForFlows — file writing', () => {
     expect(result.totalAssertionCount).toBe(0);
   });
 });
+

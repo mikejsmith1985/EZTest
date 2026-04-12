@@ -14,7 +14,7 @@ import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import type { UserFlow, GeneratedTestFile } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
-import { buildTestCodeGenerationPrompt } from './promptTemplates.js';
+import { buildTestCodeGenerationPrompt, buildAssertionReviewPrompt } from './promptTemplates.js';
 import { logDebug, logInfo, logWarning, logSuccess } from '../shared/logger.js';
 
 // ── File Name Generation ───────────────────────────────────────────────────
@@ -68,14 +68,19 @@ function extractAssertionSummary(testCode: string): string[] {
 /**
  * Generates a Playwright test file for a single user flow.
  * Returns the complete GeneratedTestFile with source code and metadata.
+ *
+ * When shouldReviewAssertions is true, runs a second AI pass after generation
+ * to catch and replace any code-level assertions that slipped through.
  */
 async function generateTestForFlow(
   userFlow: UserFlow,
   targetAppUrl: string,
   outputDirectory: string,
   aiClient: AiClient,
+  appSpec: string | undefined,
+  shouldReviewAssertions: boolean,
 ): Promise<GeneratedTestFile | null> {
-  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl);
+  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec);
 
   let aiResponse;
   try {
@@ -85,12 +90,36 @@ async function generateTestForFlow(
     return null;
   }
 
-  const sanitizedTestCode = sanitizeGeneratedTestCode(aiResponse.content);
+  let sanitizedTestCode = sanitizeGeneratedTestCode(aiResponse.content);
 
   if (!sanitizedTestCode.includes('import') || !sanitizedTestCode.includes('test(') && !sanitizedTestCode.includes('it(')) {
     logWarning(`Generated code for "${userFlow.flowName}" doesn't look like valid Playwright tests. Skipping.`);
     logDebug(`Raw output: ${aiResponse.content.slice(0, 300)}`);
     return null;
+  }
+
+  // ── Second pass: behavioral assertion review ────────────────────────────
+  // Run the reviewer only when enabled — it adds one AI call per test but catches
+  // the code-level assertions (toHaveBeenCalled, state checks) that slip through
+  // even with a strict system prompt.
+  if (shouldReviewAssertions) {
+    logDebug(`  Reviewing assertions for "${userFlow.flowName}"...`);
+    try {
+      const reviewMessages = buildAssertionReviewPrompt(sanitizedTestCode);
+      const reviewResponse = await aiClient.chat(reviewMessages, `assertion review: ${userFlow.flowName}`);
+      const reviewedCode = sanitizeGeneratedTestCode(reviewResponse.content);
+
+      // Only accept the reviewed version if it still looks like valid test code
+      if (reviewedCode.includes('import') && (reviewedCode.includes('test(') || reviewedCode.includes('it('))) {
+        sanitizedTestCode = reviewedCode;
+        logDebug(`  Assertion review complete for "${userFlow.flowName}"`);
+      } else {
+        logWarning(`Assertion review returned invalid code for "${userFlow.flowName}" — keeping original`);
+      }
+    } catch (reviewError) {
+      // Non-fatal: keep the originally generated code if review fails
+      logWarning(`Assertion review failed for "${userFlow.flowName}": ${String(reviewError)}`);
+    }
   }
 
   const testFileName = generateTestFileName(userFlow.flowName);
@@ -115,6 +144,17 @@ export interface TestGeneratorOptions {
   outputDirectory: string;
   /** Whether to write the files to disk immediately (default: true) */
   shouldWriteFilesToDisk: boolean;
+  /**
+   * Optional plain-English description of what the application does.
+   * Injected into test generation prompts to improve behavioral accuracy.
+   */
+  appSpec?: string;
+  /**
+   * Whether to run a second AI pass to review and fix any code-level assertions
+   * that slipped through the initial generation. Default: true.
+   * Disable with --no-review to reduce API calls for large test suites.
+   */
+  shouldReviewAssertions: boolean;
 }
 
 /** The result of a complete test generation run. */
@@ -138,7 +178,7 @@ export async function generateTestsForFlows(
   aiClient: AiClient,
   options: TestGeneratorOptions,
 ): Promise<TestGenerationResult> {
-  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk } = options;
+  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, shouldReviewAssertions } = options;
 
   if (userFlows.length === 0) {
     logWarning('No user flows provided to test generator. Nothing to generate.');
@@ -154,7 +194,11 @@ export async function generateTestsForFlows(
     }
   }
 
-  logInfo(`Generating Playwright tests for ${userFlows.length} user flows...`);
+  if (shouldReviewAssertions) {
+    logInfo(`Generating Playwright tests for ${userFlows.length} user flows (with behavioral assertion review)...`);
+  } else {
+    logInfo(`Generating Playwright tests for ${userFlows.length} user flows...`);
+  }
 
   const generatedFiles: GeneratedTestFile[] = [];
   let failedFlowCount = 0;
@@ -167,6 +211,8 @@ export async function generateTestsForFlows(
       targetAppUrl,
       outputDirectory,
       aiClient,
+      appSpec,
+      shouldReviewAssertions,
     );
 
     if (!generatedFile) {

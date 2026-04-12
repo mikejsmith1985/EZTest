@@ -3,9 +3,11 @@
  *
  * Orchestrates the full Phase 1 synthesis pipeline:
  * 1. Reads source code from the target directory
- * 2. Analyzes components with the CodeAnalyzer
- * 3. Maps components to user flows with the FlowMapper
- * 4. Generates Playwright test files with the TestGenerator
+ * 2. Auto-detects or reads an app spec (README/eztest-spec.md) for business context
+ * 3. Analyzes components with the CodeAnalyzer
+ * 4. Maps components to user flows with the FlowMapper
+ * 5. Generates Playwright test files with the TestGenerator
+ * 6. Optionally runs a second behavioral assertion review pass
  *
  * Usage: eztest generate --source ./src --url http://localhost:3000 --output ./tests/e2e
  */
@@ -16,6 +18,7 @@ import { logInfo, logSuccess, logError, logWarning, enableVerboseLogging } from 
 import { analyzeSourceDirectory } from '../../synthesizer/codeAnalyzer.js';
 import { mapComponentAnalysesToUserFlows } from '../../synthesizer/flowMapper.js';
 import { generateTestsForFlows } from '../../synthesizer/testGenerator.js';
+import { detectAndReadAppSpec, readAppSpecFromFile } from '../../synthesizer/appSpecReader.js';
 
 /** Maximum components to analyze per run — prevents runaway API costs. */
 const DEFAULT_MAX_COMPONENT_COUNT = 50;
@@ -60,6 +63,16 @@ export function registerGenerateCommand(program: Command): void {
       'Skip per-component intent analysis (faster but may produce less connected flows)',
     )
     .option(
+      '--spec <file>',
+      'Path to a plain-English app spec file (README.md, eztest-spec.md, etc.). ' +
+      'Auto-detected from the source directory when not provided. ' +
+      'This is the single biggest quality lever for behavioral test generation.',
+    )
+    .option(
+      '--no-review',
+      'Skip the behavioral assertion review pass (saves API calls but may let code-level assertions through)',
+    )
+    .option(
       '--dry-run',
       'Generate tests but print to stdout instead of writing files',
     )
@@ -74,6 +87,8 @@ export function registerGenerateCommand(program: Command): void {
       edgeCases: boolean;
       maxComponents: string;
       deepAnalysis: boolean;
+      spec?: string;
+      review: boolean;
       dryRun: boolean;
       verbose: boolean;
     }) => {
@@ -89,7 +104,27 @@ export function registerGenerateCommand(program: Command): void {
       logInfo(`  Target URL: ${commandOptions.url}`);
       logInfo(`  Output: ${commandOptions.output}`);
 
-      // ── Stage 1: Initialize AI client ──
+      // ── Stage 1: Load app spec ──
+      // The app spec is optional but dramatically improves test quality by giving
+      // the AI the business intent of the application alongside the mechanical code.
+      let appSpec: string | null = null;
+      if (commandOptions.spec) {
+        // User explicitly provided a spec file path
+        const specResult = readAppSpecFromFile(commandOptions.spec);
+        appSpec = specResult?.specContent ?? null;
+      } else {
+        // Auto-detect from the source directory and its parent (project root)
+        appSpec = detectAndReadAppSpec(commandOptions.source);
+        if (!appSpec) {
+          logWarning(
+            '  No app spec found. Create an eztest-spec.md in your project root to improve test quality.\n' +
+            '  Example content: "This is a shopping cart app. Users can add items, update quantities,\n' +
+            '  and complete checkout. The cart total must always reflect the current items."\n',
+          );
+        }
+      }
+
+      // ── Stage 2: Initialize AI client ──
       const aiClient = new AiClient(ezTestConfig.ai);
       try {
         await aiClient.initialize();
@@ -102,7 +137,7 @@ export function registerGenerateCommand(program: Command): void {
         process.exit(1);
       }
 
-      // ── Stage 2: Analyze source code ──
+      // ── Stage 3: Analyze source code ──
       logInfo('\nAnalyzing source code...');
       let componentAnalyses;
       try {
@@ -126,13 +161,14 @@ export function registerGenerateCommand(program: Command): void {
 
       logSuccess(`Found ${componentAnalyses.length} components with interactive elements`);
 
-      // ── Stage 3: Map to user flows ──
+      // ── Stage 4: Map to user flows ──
       logInfo('\nMapping components to user flows...');
       let userFlows;
       try {
         userFlows = await mapComponentAnalysesToUserFlows(componentAnalyses, aiClient, {
           targetAppUrl: commandOptions.url,
           shouldAnalyzeIndividualComponents: commandOptions.deepAnalysis,
+          appSpec: appSpec ?? undefined,
         });
       } catch (mappingError) {
         logError('User flow mapping failed', mappingError);
@@ -153,12 +189,18 @@ export function registerGenerateCommand(program: Command): void {
 
       // ── Stage 4: Generate test files ──
       logInfo('\nGenerating Playwright test files...');
+      if (commandOptions.review) {
+        logInfo('  Behavioral assertion review pass: ENABLED');
+      }
+
       let generationResult;
       try {
         generationResult = await generateTestsForFlows(flowsToGenerate, aiClient, {
           targetAppUrl: commandOptions.url,
           outputDirectory: commandOptions.output,
           shouldWriteFilesToDisk: !commandOptions.dryRun,
+          appSpec: appSpec ?? undefined,
+          shouldReviewAssertions: commandOptions.review,
         });
       } catch (generationError) {
         logError('Test generation failed', generationError);
