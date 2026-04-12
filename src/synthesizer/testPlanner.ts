@@ -169,7 +169,7 @@ export async function generateTestPlan(options: TestPlannerOptions): Promise<Tes
   const componentAnalyses = await analyzeSourceDirectory({
     sourceDirectory,
     excludePatterns: ezTestConfig.globalExcludePatterns,
-    maxFileCount: 50,
+    maxFileCount: 200,
   });
 
   logDebug(`Test planner: found ${componentAnalyses.length} components`);
