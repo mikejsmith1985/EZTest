@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **`--max-flows` CLI option on `eztest generate`** — caps the number of user flows to generate tests for (default: 10). GitHub Models free tier allows ~10 requests/minute; without this cap, 30+ flows generate 30+ sequential API calls and can take 15+ minutes to complete.
+- **Automatic free-tier model rotation in `aiClient.ts`** — when a GitHub Models model exhausts its daily quota, EZTest automatically rotates to the next model in the `GITHUB_FREE_MODEL_ROTATION` list instead of failing. Test generation continues uninterrupted across up to 19 different free-tier models (OpenAI gpt-4.1/4o/mini/nano, Meta Llama 4 Scout/Maverick/3.3-70B/405B, DeepSeek-V3, Mistral Medium/Small/Codestral, AI21 Jamba, Cohere, Phi-4, and gpt-5-mini for Copilot Pro users).
+- **`GITHUB_FREE_MODEL_ROTATION` constant in `config.ts`** — ordered list of all non-premium GitHub Models model IDs, arranged by quality tier (HIGH 50/day before LOW 150/day) with clear comments explaining the reasoning for each model's position.
+- **`ModelQuotaExhaustedError` class in `aiClient.ts`** — exported error type thrown by `executeWithRetry` when quota exhaustion is detected. Carries `exhaustedModelName` and `secondsUntilReset` for precise UI messaging. `AiClient.chat()` catches this internally; callers only see it if all 19 models are exhausted.
+- **`extractRetryAfterSeconds()` helper** — extracts the raw seconds value from the retry-after header without filtering, enabling `ModelQuotaExhaustedError` to show users an accurate reset countdown.
+- **`buildModelRotationList()` helper** — constructs the model rotation array from `AiConfig`: full rotation for GitHub provider, single-model list for OpenAI/Anthropic. If a `modelOverride` is set, the rotation starts at that model's position and falls through.
+
+### Changed
+- **`getDefaultModelForProvider('github')`** now returns `GITHUB_FREE_MODEL_ROTATION[0]` (`gpt-4.1`) instead of the hard-coded `'gpt-4o'`, keeping the default in sync with the rotation list priority order.
+- **`AiClient` class** replaces `resolvedModelName: string` with `modelRotationList: readonly string[]` + `activeModelIndex: number`. The `modelName` getter now returns the currently active model (which changes as models are rotated).
+- **`executeWithRetry`** now accepts a `currentModelName: string` parameter and throws `ModelQuotaExhaustedError` on quota exhaustion instead of `break`-ing out of the retry loop and re-throwing a raw API error.
+- **Quota exhaustion warning message** in `extractRetryAfterDelayMs` updated from "Switch to a different AI provider" to "EZTest will automatically try the next available model in the free-tier rotation."
+
+— caps the number of user flows to generate tests for (default: 10). GitHub Models free tier allows ~10 requests/minute; without this cap, 30+ flows generate 30+ sequential API calls and can take 15+ minutes to complete.
 - **`FLOW_MAPPING_BATCH_SIZE = 40` in `flowMapper.ts`** — all components are sent in one batch for flow generation (down from many small batches), dramatically reducing the number of API calls per run.
 - **`FLOW_GENERATION_SYSTEM_PROMPT`** — compact ~150-token system prompt specifically for the flow-mapping stage, replacing the full `BEHAVIORAL_QA_SYSTEM_PROMPT` (~875 tokens) that was causing GitHub Models 8K token limit failures when combined with 20+ component element lists.
 - **Quota exhaustion detection in `aiClient.ts`** — when GitHub Models returns a `retry-after` header greater than 5 minutes (indicating the daily free-tier quota is exhausted), EZTest immediately fails with an actionable error message. Previously would wait 23 hours.

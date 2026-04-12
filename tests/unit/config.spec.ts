@@ -169,8 +169,8 @@ test.describe('getDefaultModelForProvider', () => {
     expect(getDefaultModelForProvider('openai')).toBe('gpt-4o');
   });
 
-  test('returns gpt-4o for github provider', () => {
-    expect(getDefaultModelForProvider('github')).toBe('gpt-4o');
+  test('returns gpt-4.1 for github provider (first model in free-tier rotation)', () => {
+    expect(getDefaultModelForProvider('github')).toBe('gpt-4.1');
   });
 
   test('returns claude-3-5-sonnet for anthropic provider', () => {

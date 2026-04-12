@@ -263,16 +263,70 @@ export function loadConfig(workingDirectory: string = process.cwd()): EZTestConf
   return mergedConfig;
 }
 
+// ── GitHub Models Free-Tier Rotation ──────────────────────────────────────
+
+/**
+ * Ordered list of GitHub Models free-tier model IDs used for automatic rotation.
+ * When a model exhausts its daily quota, EZTest automatically tries the next model
+ * in this list so test generation can continue uninterrupted.
+ *
+ * Ordering rationale (quality first, then by tier):
+ *   - HIGH tier (50 req/day): OpenAI > Meta Llama > DeepSeek > AI21 > Cohere
+ *   - LOW  tier (150 req/day): OpenAI mini/nano > Mistral > Phi
+ *   - CUSTOM tier (12 req/day, Copilot Pro only): gpt-5-mini as final OpenAI fallback
+ *
+ * Excluded: premium `custom` tier models (gpt-5, o1, o3, DeepSeek-R1, Grok-3),
+ * embedding-only models, and vision-specialist models unlikely to produce valid JSON.
+ *
+ * Tip: `low` tier models have 3× the daily quota of `high` tier models, so
+ * gpt-4.1-mini and gpt-4o-mini often have quota available when gpt-4.1 and gpt-4o do not.
+ */
+export const GITHUB_FREE_MODEL_ROTATION: readonly string[] = [
+  // ── HIGH tier — OpenAI (50 req/day, best JSON schema adherence) ──────────
+  'gpt-4.1',        // newest GPT-4 flagship — best coding + instruction following
+  'gpt-4o',         // proven EZTest default — strong behavioral test generation
+  // ── LOW tier — OpenAI (150 req/day, generous quota) ─────────────────────
+  'gpt-4.1-mini',   // excellent quality-to-quota ratio
+  'gpt-4o-mini',    // solid fallback with high request volume
+  // ── HIGH tier — Meta Llama (50 req/day, strong instruction following) ────
+  'Llama-3.3-70B-Instruct',              // Meta's best instruction model
+  'Llama-4-Scout-17B-16E-Instruct',      // 10M token context window
+  'Llama-4-Maverick-17B-128E-Instruct-FP8', // strong multimodal reasoning
+  'Meta-Llama-3.1-405B-Instruct',        // very large parameter count, highly capable
+  // ── HIGH tier — DeepSeek (50 req/day, excellent code generation) ─────────
+  'DeepSeek-V3-0324',
+  // ── HIGH tier — AI21 Labs (50 req/day, 256K context window) ─────────────
+  'AI21-Jamba-1.5-Large',
+  // ── HIGH tier — Cohere (50 req/day, optimised for tool use and RAG) ─────
+  'Cohere-command-r-plus-08-2024',
+  // ── LOW tier — Mistral (150 req/day, code-focused models) ────────────────
+  'mistral-medium-2505',   // Mistral Medium 3 — good general purpose
+  'Codestral-2501',        // code-specialized model designed for programming tasks
+  'mistral-small-2503',    // Mistral Small 3.1 — lightweight and fast
+  // ── LOW tier — Cohere (150 req/day) ──────────────────────────────────────
+  'cohere-command-a',
+  // ── LOW tier — Microsoft Phi (150 req/day, note: Phi-4 has 16K context) ─
+  'Phi-4',                 // strong reasoning; context window is 16K (usually adequate)
+  'Phi-4-mini-instruct',   // very lightweight fallback
+  // ── LOW tier — last resort (150 req/day) ─────────────────────────────────
+  'gpt-4.1-nano',
+  // ── CUSTOM tier — Copilot Pro only (12 req/day) ──────────────────────────
+  // Placed last because the 12 req/day quota is very small; only used when
+  // all other models are already exhausted for the day.
+  'gpt-5-mini',
+] as const;
+
 /**
  * Returns the default AI model name for a given provider.
  * These are the best models for code analysis and test generation as of this writing.
+ * For GitHub Models, the default is the first model in the free-tier rotation list.
  */
 export function getDefaultModelForProvider(provider: AiProviderName): string {
   const modelMap: Record<AiProviderName, string> = {
     openai: 'gpt-4o',
     anthropic: 'claude-3-5-sonnet-20241022',
-    // GitHub Models API (Copilot subscription) — gpt-4o gives the best behavioral test quality
-    github: 'gpt-4o',
+    // GitHub Models API — start with gpt-4.1, then rotate through GITHUB_FREE_MODEL_ROTATION
+    github: GITHUB_FREE_MODEL_ROTATION[0],
   };
   return modelMap[provider];
 }
