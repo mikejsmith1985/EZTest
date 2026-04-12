@@ -23,18 +23,20 @@ import { logDebug, logWarning } from '../shared/logger.js';
 /**
  * Maximum number of components to include in a single flow-generation API call.
  *
- * The GitHub Models API (free tier) limits request bodies to ~8000 input tokens.
- * With the reduced source excerpt in buildUserFlowGenerationPrompt:
- *   - ~1100 tokens: prompt overhead (system prompt + user instructions)
- *   - ~155 tokens per component: name + element list + 400-char source excerpt
- *   - 20 components × 155 = 3100 + 1100 overhead = 4200 tokens ✅ well under limit
- *   - 40 components × 155 = 6200 + 1100 overhead = 7300 tokens ✅ still under limit
+ * Token budget breakdown:
+ *   - ~150 tokens: compact system prompt
+ *   - ~500 tokens: app spec section
+ *   - ~55 tokens per component: name + element list (source omitted to save tokens)
+ *   - 15 components × 55 = 825 input tokens — total input ~1475 tokens ✅
+ *   - Output: 15 components × 3 flows × 4 steps × ~12 tokens/step ≈ 2160 tokens ✅
  *
- * A batch size of 40 means most projects (< 40 UI components) are handled in ONE
- * API call, avoiding rate-limit 429 waits that occur with many small calls.
- * For projects with > 40 components, it still batches efficiently.
+ * This fits comfortably within the 4096-token output cap (Copilot Pro limit).
+ * The previous value of 40 caused gpt-4.1 to generate ~4400 output tokens for
+ * 26-component projects, truncating the JSON mid-array and losing all flows.
+ *
+ * For most projects (< 30 UI components), this means 2 API calls max — still fast.
  */
-const FLOW_MAPPING_BATCH_SIZE = 40;
+const FLOW_MAPPING_BATCH_SIZE = 15;
 
 // ── Batch Helpers ──────────────────────────────────────────────────────────
 
@@ -82,8 +84,48 @@ interface AiGeneratedFlow {
 }
 
 /**
+ * Attempts to recover a valid JSON array from a response that was cut off mid-stream
+ * because the model hit its output token limit. Tries two strategies in order:
+ *   1. Truncate at the last `},` boundary (end of last complete array item)
+ *   2. Truncate at the last `}` (catches the final item if it wasn't followed by a comma)
+ * Returns null if neither strategy produces a parseable array with at least one item.
+ */
+function recoverTruncatedJsonArray(truncatedContent: string): unknown[] | null {
+  if (!truncatedContent.trim().startsWith('[')) return null;
+
+  // Strategy 1: find the last complete object ending with `},` and close the array
+  const lastCommaEnd = truncatedContent.lastIndexOf('},');
+  if (lastCommaEnd !== -1) {
+    try {
+      const candidate = truncatedContent.slice(0, lastCommaEnd + 1) + ']';
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {
+      // Fall through to strategy 2
+    }
+  }
+
+  // Strategy 2: find the last `}` — works when the final object was complete but
+  // the closing `]` was never emitted before the token limit was hit
+  const lastBrace = truncatedContent.lastIndexOf('}');
+  if (lastBrace !== -1) {
+    try {
+      const candidate = truncatedContent.slice(0, lastBrace + 1) + ']';
+      const parsed = JSON.parse(candidate);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {
+      // Truly unrecoverable
+    }
+  }
+
+  return null;
+}
+
+/**
  * Parses a JSON response from the AI, with graceful error handling.
  * Returns null if parsing fails — the caller decides how to handle missing data.
+ * For array responses, also attempts truncation recovery when the model hits its
+ * output token limit and returns incomplete JSON.
  */
 function parseAiJsonResponse<ParsedType>(
   aiResponseContent: string,
@@ -98,6 +140,20 @@ function parseAiJsonResponse<ParsedType>(
   try {
     return JSON.parse(cleanedContent) as ParsedType;
   } catch (parseError) {
+    // When the response looks like a truncated JSON array, try to recover whatever
+    // complete items were emitted before the token limit cut the response short.
+    // This preserves partial flow results instead of discarding the entire batch.
+    if (cleanedContent.startsWith('[')) {
+      const recoveredItems = recoverTruncatedJsonArray(cleanedContent);
+      if (recoveredItems && recoveredItems.length > 0) {
+        logWarning(
+          `AI response for "${operationDescription}" was truncated at the token limit. ` +
+          `Recovered ${recoveredItems.length} item(s) from the partial response.`,
+        );
+        return recoveredItems as ParsedType;
+      }
+    }
+
     logWarning(`Could not parse AI JSON response for "${operationDescription}": ${String(parseError)}`);
     logDebug(`Raw AI response: ${aiResponseContent.slice(0, 500)}`);
     return null;
