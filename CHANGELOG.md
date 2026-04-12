@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Complete UI overhaul — EZTest is now an application, not a wizard** — replaced the 4-step wizard with a full app-style interface: persistent app bar with project pill, dashboard with 3 plain-English action cards, native Windows folder picker, and an auto-showing onboarding overlay on first launch (just like any well-designed app)
+  - **No typing required** — folder picker and file picker dialogs open natively via Windows Forms; URL fields are pre-filled from the last session
+  - **3 action cards with plain-English explanations** — "Write Tests For My App" (AI reads code, writes behavioral tests), "Record a Testing Session" (flag broken things in a live browser), and "Fix a Failing Test" (find + fix + validate); each card explains what it does and when to use it
+  - **Auto-onboarding on first launch** — step 1 picks the project folder and immediately shows what EZTest detected (framework, language, file counts); step 2 shows the AI provider already connected or asks for a key; onboarding is skippable on return visits
+  - **Project summary bar** — shows project name, framework, language, source file count, and existing test count at the top of every session
+  - **`POST /api/browse-folder`** — opens a native Windows FolderBrowserDialog via PowerShell (no SDK required); returns the selected path to the browser
+  - **`POST /api/browse-file`** — opens a native Windows OpenFileDialog for selecting report JSON files
+  - **`GET|POST /api/app-config`** — persists the user's selected project path and app URL to `app-config.json`; also returns a real-time scan of the selected project (framework detection, file counts) on every GET
+  - **`app-config.json`** added to `.gitignore` (stores user-specific project path, never committed)
+
 ### Added
 - **`EZTest.exe` — native Windows double-click launcher** — compiled C# WinForms application that starts the EZTest wizard server silently in the background and opens `http://localhost:7433` in your default browser; detects the EZTest root folder automatically by walking up from the exe location; prompts for first-time build if `dist/` is missing; no terminal window, no VBScript, no manual setup; rebuild anytime via `npm run build:launcher` (requires no .NET SDK — uses the .NET Framework compiler built into Windows)
 - **`launcher/EZTestLauncher.cs`** — C# source for the launcher; `launcher/build.ps1` — PowerShell build script using `csc.exe` from .NET Framework 4.x

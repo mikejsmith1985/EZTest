@@ -25,3 +25,6 @@ Thumbs.db
 .vscode/settings.json
 .vscode/launch.json
 *.log
+
+# EZTest app settings (stores user's selected project path — not for committing)
+app-config.json

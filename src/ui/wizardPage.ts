@@ -1,29 +1,29 @@
 /**
- * Wizard Page — builds the complete HTML string for the EZTest browser UI.
- * All four steps of the wizard (environment check, workflow selection,
- * configuration, and live run output) are embedded in a single self-contained page.
+ * App Page — builds the complete HTML string for the EZTest browser UI.
+ * This is the full application: an app-bar, project dashboard with action cards,
+ * a first-launch onboarding overlay, and a run-output modal — all self-contained
+ * in a single HTML document so no external assets are needed.
  *
  * IMPORTANT: The embedded <script> block must NOT use JS template literals
- * (backticks / ${}) because this entire string is a TypeScript template literal.
- * All dynamic JS values use string concatenation instead.
+ * (backticks / ${...}) because this entire string is a TypeScript template literal.
+ * All dynamic JS values must use string concatenation instead.
  */
 
-// ── Color palette constants ──────────────────────────────────────────────────
+// ── Color palette ────────────────────────────────────────────────────────────
 
-const COLOR_BACKGROUND   = '#0d1117';
-const COLOR_CARD         = '#161b22';
-const COLOR_BORDER       = '#30363d';
-const COLOR_ACCENT       = '#7c3aed';
-const COLOR_SUCCESS      = '#3fb950';
-const COLOR_ERROR        = '#f85149';
-const COLOR_WARNING      = '#e3b341';
-const COLOR_TEXT_PRIMARY = '#e6edf3';
-const COLOR_TEXT_MUTED   = '#8b949e';
+const COLOR_BG       = '#0d1117';
+const COLOR_CARD     = '#161b22';
+const COLOR_BORDER   = '#30363d';
+const COLOR_ACCENT   = '#7c3aed';
+const COLOR_SUCCESS  = '#3fb950';
+const COLOR_ERROR    = '#f85149';
+const COLOR_WARNING  = '#e3b341';
+const COLOR_PRIMARY  = '#e6edf3';
+const COLOR_MUTED    = '#8b949e';
 
 /**
- * Returns the full HTML document for the EZTest wizard as a string.
- * The page is self-contained — CSS and JS are both inlined so no external
- * assets are needed beyond the Socket.io script served by the server itself.
+ * Returns the full HTML document for the EZTest application as a string.
+ * The page is entirely self-contained — all CSS and JavaScript are inlined.
  */
 export function buildWizardPageHtml(): string {
   return `<!DOCTYPE html>
@@ -31,739 +31,1090 @@ export function buildWizardPageHtml(): string {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>EZTest Wizard</title>
+  <title>EZTest</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     body {
-      background: ${COLOR_BACKGROUND};
-      color: ${COLOR_TEXT_PRIMARY};
+      background: ${COLOR_BG};
+      color: ${COLOR_PRIMARY};
       font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       min-height: 100vh;
+    }
+
+    /* ── App bar ── */
+    .app-bar {
+      height: 56px;
+      background: ${COLOR_CARD};
+      border-bottom: 1px solid ${COLOR_BORDER};
       display: flex;
-      align-items: flex-start;
-      justify-content: center;
-      padding: 40px 16px 80px;
+      align-items: center;
+      padding: 0 24px;
+      gap: 12px;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .app-bar-brand {
+      font-size: 1.1rem;
+      font-weight: 800;
+      letter-spacing: -0.3px;
+      color: ${COLOR_PRIMARY};
+    }
+    .app-bar-brand span { color: ${COLOR_ACCENT}; }
+    .app-bar-spacer { flex: 1; }
+    .project-pill {
+      display: flex;
+      align-items: center;
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 20px;
+      padding: 4px 6px 4px 14px;
+      gap: 8px;
+      font-size: 0.83rem;
+      max-width: 380px;
+      overflow: hidden;
+    }
+    .project-pill-name {
+      color: ${COLOR_PRIMARY};
+      font-weight: 500;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .project-pill-name.muted { color: ${COLOR_MUTED}; }
+    .pill-btn {
+      background: #21262d;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_MUTED};
+      border-radius: 12px;
+      padding: 3px 10px;
+      font-size: 0.75rem;
+      cursor: pointer;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+    .pill-btn:hover { background: #30363d; color: ${COLOR_PRIMARY}; }
+
+    /* ── Dashboard ── */
+    .dashboard {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 36px 24px 80px;
     }
 
-    .wizard-container {
+    /* Project summary bar */
+    .project-summary-bar {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 10px;
+      padding: 16px 24px;
+      display: flex;
+      gap: 32px;
+      margin-bottom: 36px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .summary-stat { display: flex; flex-direction: column; gap: 2px; }
+    .summary-stat-label {
+      font-size: 0.7rem;
+      color: ${COLOR_MUTED};
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+    .summary-stat-value { font-size: 1rem; font-weight: 700; color: ${COLOR_PRIMARY}; }
+    .summary-divider {
+      width: 1px;
+      height: 32px;
+      background: ${COLOR_BORDER};
+    }
+
+    /* Section heading */
+    .section-heading {
+      font-size: 1.35rem;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+    .section-subheading {
+      font-size: 0.9rem;
+      color: ${COLOR_MUTED};
+      margin-bottom: 28px;
+      line-height: 1.5;
+    }
+
+    /* ── Action cards ── */
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 620px) { .action-grid { grid-template-columns: 1fr; } }
+
+    .action-card {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 12px;
+      padding: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+      cursor: default;
+    }
+    .action-card:hover { border-color: ${COLOR_ACCENT}; box-shadow: 0 0 0 1px ${COLOR_ACCENT}22; }
+
+    .action-icon { font-size: 2.2rem; line-height: 1; }
+    .action-title { font-size: 1.05rem; font-weight: 700; color: ${COLOR_PRIMARY}; margin-top: 2px; }
+    .action-description {
+      font-size: 0.875rem;
+      color: ${COLOR_MUTED};
+      line-height: 1.6;
+      flex: 1;
+    }
+    .action-best-for {
+      font-size: 0.78rem;
+      color: ${COLOR_ACCENT};
+      line-height: 1.4;
+      padding: 8px 12px;
+      background: ${COLOR_ACCENT}11;
+      border-radius: 6px;
+      border-left: 2px solid ${COLOR_ACCENT};
+    }
+    .action-best-for strong { font-weight: 700; }
+    .action-btn {
+      margin-top: 6px;
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 11px 16px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
       width: 100%;
-      max-width: 720px;
+      transition: background 0.2s;
+    }
+    .action-btn:hover { background: #6d28d9; }
+    .action-btn:disabled { background: ${COLOR_BORDER}; color: ${COLOR_MUTED}; cursor: not-allowed; }
+    .action-secondary-link {
+      text-align: center;
+      font-size: 0.78rem;
+      color: ${COLOR_MUTED};
+      cursor: pointer;
+      text-decoration: underline;
+    }
+    .action-secondary-link:hover { color: ${COLOR_PRIMARY}; }
+
+    /* ── Onboarding overlay ── */
+    .onboarding-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(13, 17, 23, 0.96);
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .onboarding-card {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 16px;
+      padding: 40px;
+      max-width: 520px;
+      width: 100%;
+      text-align: center;
+    }
+    .ob-step-number {
+      font-size: 0.72rem;
+      color: ${COLOR_MUTED};
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 20px;
+    }
+    .ob-icon { font-size: 3rem; margin-bottom: 16px; line-height: 1; }
+    .ob-heading {
+      font-size: 1.4rem;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+    .ob-body {
+      color: ${COLOR_MUTED};
+      font-size: 0.9rem;
+      line-height: 1.65;
+      margin-bottom: 24px;
     }
 
-    /* ── Header ── */
-    .wizard-header {
+    /* Detected project card */
+    .detected-project-card {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_SUCCESS};
+      border-radius: 10px;
+      padding: 16px 18px;
+      text-align: left;
+      margin-bottom: 20px;
+    }
+    .detected-project-name {
+      font-weight: 700;
+      color: ${COLOR_SUCCESS};
+      margin-bottom: 8px;
+      font-size: 0.95rem;
+    }
+    .detected-project-stats {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .detected-stat { font-size: 0.83rem; color: ${COLOR_MUTED}; }
+    .detected-stat strong { color: ${COLOR_PRIMARY}; font-weight: 600; }
+
+    /* AI provider card in onboarding */
+    .ai-status-card {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 10px;
+      padding: 16px 18px;
+      text-align: left;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+    .ai-status-card.is-ready { border-color: ${COLOR_SUCCESS}; }
+    .ai-status-icon { font-size: 1.8rem; }
+    .ai-status-label { font-weight: 700; font-size: 0.95rem; margin-bottom: 2px; }
+    .ai-status-sublabel { font-size: 0.82rem; color: ${COLOR_MUTED}; }
+
+    /* Manual provider form (shown when no key found) */
+    .provider-form { text-align: left; margin-bottom: 20px; }
+    .provider-form label {
+      display: block;
+      font-size: 0.8rem;
+      color: ${COLOR_MUTED};
+      margin-bottom: 5px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+    }
+    .provider-form select,
+    .provider-form input {
+      width: 100%;
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 7px;
+      color: ${COLOR_PRIMARY};
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      outline: none;
+      margin-bottom: 12px;
+    }
+    .provider-form select:focus,
+    .provider-form input:focus { border-color: ${COLOR_ACCENT}; }
+
+    /* ── Shared buttons ── */
+    .btn-primary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 24px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      width: 100%;
+    }
+    .btn-primary:hover:not(:disabled) { background: #6d28d9; }
+    .btn-primary:disabled { background: ${COLOR_BORDER}; color: ${COLOR_MUTED}; cursor: not-allowed; }
+    .btn-ghost {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      color: ${COLOR_MUTED};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px;
+      padding: 10px 20px;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .btn-ghost:hover { background: #21262d; color: ${COLOR_PRIMARY}; }
+    .btn-large { padding: 15px 28px; font-size: 1rem; }
+    .btn-row { display: flex; gap: 10px; margin-top: 8px; }
+
+    /* ── Action config overlay (URL / report input before running) ── */
+    .config-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(13, 17, 23, 0.88);
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .config-card {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 14px;
+      padding: 32px;
+      max-width: 460px;
+      width: 100%;
+    }
+    .config-card-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 6px; }
+    .config-card-desc { font-size: 0.87rem; color: ${COLOR_MUTED}; line-height: 1.55; margin-bottom: 22px; }
+    .config-input-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+    .config-input-row label { font-size: 0.8rem; color: ${COLOR_MUTED}; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
+    .config-input-wrap { display: flex; gap: 8px; }
+    .config-input {
+      flex: 1;
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 7px;
+      color: ${COLOR_PRIMARY};
+      padding: 9px 12px;
+      font-size: 0.9rem;
+      outline: none;
+    }
+    .config-input:focus { border-color: ${COLOR_ACCENT}; }
+    .config-browse-btn {
+      background: #21262d;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_MUTED};
+      border-radius: 7px;
+      padding: 9px 14px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .config-browse-btn:hover { background: #30363d; color: ${COLOR_PRIMARY}; }
+    .config-btn-row { display: flex; gap: 10px; margin-top: 20px; }
+    .config-btn-row .btn-primary { flex: 1; }
+    .config-btn-row .btn-ghost { width: auto; }
+
+    /* ── Run output modal ── */
+    .run-modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(13, 17, 23, 0.92);
+      z-index: 200;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .run-modal-inner {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 14px;
+      width: 100%;
+      max-width: 780px;
+      display: flex;
+      flex-direction: column;
+      max-height: 82vh;
+    }
+    .run-modal-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      margin-bottom: 32px;
-    }
-    .wizard-logo {
-      font-size: 1.5rem;
-      font-weight: 700;
-      letter-spacing: -0.5px;
-    }
-
-    /* ── Step dots ── */
-    .step-dots {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-    }
-    .step-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      background: ${COLOR_BORDER};
-      transition: background 0.25s;
-      cursor: default;
-    }
-    .step-dot.active   { background: ${COLOR_ACCENT}; }
-    .step-dot.complete { background: ${COLOR_SUCCESS}; }
-    .step-connector {
-      width: 24px;
-      height: 2px;
-      background: ${COLOR_BORDER};
-    }
-
-    /* ── Card ── */
-    .card {
-      background: ${COLOR_CARD};
-      border: 1px solid ${COLOR_BORDER};
-      border-radius: 10px;
-      padding: 20px 24px;
-    }
-    .card + .card { margin-top: 12px; }
-
-    /* ── Section title ── */
-    .section-title {
-      font-size: 1.15rem;
-      font-weight: 600;
-      margin-bottom: 20px;
-    }
-
-    /* ── Check item row (Step 1) ── */
-    .check-item {
-      display: flex;
-      align-items: flex-start;
-      gap: 14px;
-      padding: 16px 0;
+      padding: 16px 20px;
       border-bottom: 1px solid ${COLOR_BORDER};
-    }
-    .check-item:last-child { border-bottom: none; }
-    .check-icon {
-      font-size: 1.3rem;
-      margin-top: 2px;
-      min-width: 24px;
-      text-align: center;
-    }
-    .check-body { flex: 1; }
-    .check-title {
-      font-weight: 600;
-      font-size: 0.95rem;
-      margin-bottom: 3px;
-    }
-    .check-subtitle {
-      font-size: 0.82rem;
-      color: ${COLOR_TEXT_MUTED};
-      line-height: 1.5;
-    }
-    .check-subtitle.error-text { color: ${COLOR_ERROR}; }
-    .check-subtitle.success-text { color: ${COLOR_SUCCESS}; }
-
-    /* ── Inline API key form ── */
-    .api-key-form {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .api-key-form select,
-    .api-key-form input {
-      background: ${COLOR_BACKGROUND};
-      border: 1px solid ${COLOR_BORDER};
-      border-radius: 6px;
-      color: ${COLOR_TEXT_PRIMARY};
-      padding: 6px 10px;
-      font-size: 0.85rem;
-      outline: none;
-    }
-    .api-key-form select:focus,
-    .api-key-form input:focus { border-color: ${COLOR_ACCENT}; }
-    .api-key-form input { flex: 1; min-width: 180px; }
-    .api-key-form .save-note {
-      font-size: 0.78rem;
-      color: ${COLOR_TEXT_MUTED};
-      width: 100%;
-      margin-top: 2px;
-    }
-
-    /* ── Workflow cards grid (Step 2) ── */
-    .workflow-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-      gap: 12px;
-      margin-bottom: 20px;
-    }
-    @media (max-width: 560px) {
-      .workflow-grid { grid-template-columns: 1fr; }
-    }
-    .workflow-card {
-      background: ${COLOR_CARD};
-      border: 2px solid ${COLOR_BORDER};
-      border-radius: 10px;
-      padding: 20px 16px;
-      cursor: pointer;
-      transition: border-color 0.2s, background 0.2s;
-      text-align: center;
-    }
-    .workflow-card:hover { border-color: ${COLOR_ACCENT}; background: #1c2230; }
-    .workflow-card.selected {
-      border-color: ${COLOR_ACCENT};
-      background: #1a1535;
-    }
-    .workflow-card .wf-emoji { font-size: 2rem; display: block; margin-bottom: 10px; }
-    .workflow-card .wf-title {
-      font-weight: 700;
-      font-size: 0.9rem;
-      margin-bottom: 6px;
-    }
-    .workflow-card .wf-desc {
-      font-size: 0.78rem;
-      color: ${COLOR_TEXT_MUTED};
-      line-height: 1.5;
-    }
-
-    /* ── Config form (Step 3) ── */
-    .config-field { margin-bottom: 18px; }
-    .config-field label {
-      display: block;
-      font-size: 0.85rem;
-      font-weight: 600;
-      margin-bottom: 6px;
-      color: ${COLOR_TEXT_MUTED};
-    }
-    .config-field input {
-      width: 100%;
-      background: ${COLOR_BACKGROUND};
-      border: 1px solid ${COLOR_BORDER};
-      border-radius: 6px;
-      color: ${COLOR_TEXT_PRIMARY};
-      padding: 8px 12px;
-      font-size: 0.9rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    .config-field input:focus { border-color: ${COLOR_ACCENT}; }
-    .config-checkbox label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      cursor: pointer;
-      font-size: 0.85rem;
-      color: ${COLOR_TEXT_MUTED};
-    }
-    .config-checkbox input[type="checkbox"] {
-      width: auto;
-      border: none;
-      padding: 0;
-      accent-color: ${COLOR_ACCENT};
-      cursor: pointer;
-    }
-
-    /* ── Buttons ── */
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 9px 20px;
-      border: none;
-      border-radius: 6px;
-      font-size: 0.9rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: opacity 0.2s, background 0.2s;
-    }
-    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .btn-primary  { background: ${COLOR_ACCENT}; color: #fff; }
-    .btn-primary:hover:not(:disabled) { background: #6d28d9; }
-    .btn-secondary { background: ${COLOR_BORDER}; color: ${COLOR_TEXT_PRIMARY}; }
-    .btn-secondary:hover:not(:disabled) { background: #3d444d; }
-    .btn-danger { background: ${COLOR_ERROR}; color: #fff; }
-    .btn-danger:hover:not(:disabled) { background: #c9322a; }
-    .btn-save { background: ${COLOR_SUCCESS}; color: #0d1117; padding: 6px 14px; font-size: 0.83rem; }
-    .btn-save:hover:not(:disabled) { background: #2ea043; }
-
-    .btn-row {
-      display: flex;
-      gap: 10px;
-      margin-top: 24px;
-      flex-wrap: wrap;
-    }
-
-    /* ── Step panels ── */
-    .step-panel { display: none; }
-    .step-panel.active { display: block; }
-
-    /* ── Run status row (Step 4) ── */
-    .run-status-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      margin-bottom: 16px;
-      font-size: 0.92rem;
-    }
-    .spinner {
-      width: 20px;
-      height: 20px;
-      border: 3px solid ${COLOR_BORDER};
-      border-top-color: ${COLOR_ACCENT};
-      border-radius: 50%;
-      animation: spin 0.75s linear infinite;
       flex-shrink: 0;
     }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .spinner.hidden { display: none; }
-    .run-status-text { font-weight: 500; }
-
-    /* ── Terminal pane ── */
-    .terminal-pane {
-      background: #010409;
+    .run-modal-title { font-weight: 700; font-size: 0.92rem; }
+    .run-modal-cancel-btn {
+      background: transparent;
       border: 1px solid ${COLOR_BORDER};
-      border-radius: 8px;
-      padding: 14px 16px;
-      height: 320px;
-      overflow-y: auto;
-      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
-      font-size: 0.8rem;
-      line-height: 1.6;
+      color: ${COLOR_MUTED};
+      border-radius: 6px;
+      padding: 4px 12px;
+      font-size: 0.82rem;
+      cursor: pointer;
     }
-    .log-line { margin: 0; white-space: pre-wrap; word-break: break-all; }
-    .log-info    { color: #c9d1d9; }
+    .run-modal-cancel-btn:hover { border-color: ${COLOR_ERROR}; color: ${COLOR_ERROR}; }
+    .run-terminal {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px 20px;
+      font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+      font-size: 0.8rem;
+      line-height: 1.65;
+      min-height: 320px;
+      background: #010409;
+    }
+    .log-info    { color: ${COLOR_PRIMARY}; }
     .log-success { color: ${COLOR_SUCCESS}; }
-    .log-error   { color: ${COLOR_ERROR}; }
+    .log-error   { color: ${COLOR_ERROR};   }
     .log-warning { color: ${COLOR_WARNING}; }
-    .log-debug   { color: #484f58; }
+    .log-debug   { color: ${COLOR_MUTED};   }
+    .run-done-bar {
+      padding: 14px 20px;
+      border-top: 1px solid ${COLOR_BORDER};
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .run-done-bar .btn-ghost { width: auto; }
+    .run-result-success { color: ${COLOR_SUCCESS}; font-weight: 600; font-size: 0.9rem; }
+    .run-result-failure { color: ${COLOR_ERROR};   font-weight: 600; font-size: 0.9rem; }
+    .run-result-warning { color: ${COLOR_WARNING}; font-weight: 600; font-size: 0.9rem; }
+    .spinner {
+      width: 18px; height: 18px;
+      border: 2px solid ${COLOR_BORDER};
+      border-top-color: ${COLOR_ACCENT};
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: inline-block;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
-  <div class="wizard-container">
 
-    <!-- ── Shared header with step dots ── -->
-    <div class="wizard-header">
-      <span class="wizard-logo">🧪 EZTest</span>
-      <div class="step-dots" id="stepDots">
-        <div class="step-dot active" id="dot1"></div>
-        <div class="step-connector"></div>
-        <div class="step-dot" id="dot2"></div>
-        <div class="step-connector"></div>
-        <div class="step-dot" id="dot3"></div>
-        <div class="step-connector"></div>
-        <div class="step-dot" id="dot4"></div>
+  <!-- ─────────────────────────────────────────────────────────────────────
+       ONBOARDING OVERLAY
+       Shown automatically on first launch (no project configured yet).
+       Also shown when user clicks "Change Project".
+       ───────────────────────────────────────────────────────────────────── -->
+  <div id="onboarding" class="onboarding-overlay" style="display:none">
+    <div class="onboarding-card">
+
+      <!-- Step 1: Pick your project folder -->
+      <div id="ob-step-folder">
+        <div class="ob-step-number">Step 1 of 2</div>
+        <div class="ob-icon">📁</div>
+        <div class="ob-heading">Where is your project?</div>
+        <p class="ob-body">
+          EZTest reads your source code to understand what your app does,
+          then writes tests based on what users actually see and do.
+          Just point it at your project folder — it figures out the rest.
+        </p>
+        <button class="btn-primary btn-large" id="browse-folder-btn">Browse for project folder</button>
+        <div id="detected-project-card" style="display:none; margin-top:20px"></div>
+        <div id="ob-step-folder-next" style="display:none; margin-top:12px">
+          <button class="btn-primary" id="goto-provider-btn">Looks good — Next &#8594;</button>
+        </div>
+      </div>
+
+      <!-- Step 2: AI Provider -->
+      <div id="ob-step-provider" style="display:none">
+        <div class="ob-step-number">Step 2 of 2</div>
+        <div class="ob-icon">&#x1F916;</div>
+        <div class="ob-heading">AI Provider</div>
+        <p class="ob-body">
+          EZTest uses AI to read your code and write tests.
+          Connect it to your AI provider below.
+        </p>
+        <div id="ai-auto-status"></div>
+        <div id="ai-manual-form" style="display:none" class="provider-form">
+          <label>Provider</label>
+          <select id="ob-provider-select">
+            <option value="github">GitHub Copilot (uses your Copilot subscription)</option>
+            <option value="openai">OpenAI (GPT-4o)</option>
+            <option value="anthropic">Anthropic (Claude)</option>
+          </select>
+          <label>API Key</label>
+          <input type="password" id="ob-api-key" placeholder="Paste your key here" autocomplete="off" />
+        </div>
+        <div class="btn-row">
+          <button class="btn-ghost" id="ob-back-btn">&#8592; Back</button>
+          <button class="btn-primary" id="ob-finish-btn">Start Using EZTest &#8594;</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       MAIN APP
+       Hidden until onboarding is done. The real application lives here.
+       ───────────────────────────────────────────────────────────────────── -->
+  <div id="app" style="display:none">
+
+    <!-- App bar -->
+    <div class="app-bar">
+      <div class="app-bar-brand">&#x26A1; EZ<span>Test</span></div>
+      <div class="app-bar-spacer"></div>
+      <div class="project-pill">
+        <span class="project-pill-name muted" id="project-pill-name">No project selected</span>
+        <button class="pill-btn" id="change-project-btn">Change</button>
       </div>
     </div>
 
-    <!-- ══════════════════════════════════════════════════
-         Step 1 — Environment Setup
-    ══════════════════════════════════════════════════ -->
-    <div class="step-panel active" id="stepPanel1">
-      <div class="card">
-        <p class="section-title">Environment Setup</p>
+    <!-- Dashboard -->
+    <div class="dashboard">
 
-        <!-- Node.js version check -->
-        <div class="check-item">
-          <div class="check-icon" id="nodeIcon">⏳</div>
-          <div class="check-body">
-            <div class="check-title">Node.js</div>
-            <div class="check-subtitle" id="nodeSubtitle">Checking version…</div>
+      <!-- Project summary (hidden until project loaded) -->
+      <div id="project-summary-bar" class="project-summary-bar" style="display:none"></div>
+
+      <div class="section-heading">What would you like to do?</div>
+      <p class="section-subheading">
+        Pick an action below. EZTest handles the rest — no config files, no command line.
+      </p>
+
+      <div class="action-grid">
+
+        <!-- Card 1: Generate Tests -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F9EA;</div>
+          <div class="action-title">Write Tests For My App</div>
+          <div class="action-description">
+            AI reads your source code, maps out how users interact with your app,
+            and writes Playwright tests that check what users actually <em>see</em>
+            and <em>experience</em> — not just that internal functions get called.
           </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Getting meaningful test coverage fast on a new or existing project.
+          </div>
+          <button class="action-btn" id="btn-generate">Generate Tests &#8594;</button>
+          <div class="action-secondary-link" id="btn-preview-plan">Preview what it will test first</div>
         </div>
 
-        <!-- AI API key -->
-        <div class="check-item">
-          <div class="check-icon" id="apiKeyIcon">⏳</div>
-          <div class="check-body">
-            <div class="check-title">AI API Key</div>
-            <div class="check-subtitle" id="apiKeySubtitle">Checking environment…</div>
-            <!-- Shown only when no key found -->
-            <div class="api-key-form" id="apiKeyForm" style="display:none">
-              <select id="providerSelect">
-                <option value="github">GitHub Copilot (recommended — uses your Copilot subscription)</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic (Claude)</option>
-              </select>
-              <input type="password" id="apiKeyInput" placeholder="GitHub PAT, sk-… or sk-ant-…" autocomplete="off" />
-              <button class="btn btn-save" id="saveKeyBtn" onclick="saveApiKey()">Save</button>
-              <span class="save-note">Saved locally to .env</span>
-            </div>
+        <!-- Card 2: Record a Session -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F534;</div>
+          <div class="action-title">Record a Testing Session</div>
+          <div class="action-description">
+            Open your app in a real browser, use it the way a user would,
+            and tap the flag button whenever something looks wrong.
+            EZTest captures your session and turns it into repeatable test cases
+            that reproduce exactly what you found.
           </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Capturing real user workflows and bugs you discover by hand.
+          </div>
+          <button class="action-btn" id="btn-record">Start Recording &#8594;</button>
         </div>
 
-        <!-- Playwright check -->
-        <div class="check-item">
-          <div class="check-icon" id="playwrightIcon">⏳</div>
-          <div class="check-body">
-            <div class="check-title">Playwright</div>
-            <div class="check-subtitle" id="playwrightSubtitle">Checking installation…</div>
+        <!-- Card 3: Fix a Failing Test -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F527;</div>
+          <div class="action-title">Fix a Failing Test</div>
+          <div class="action-description">
+            Got a test that's broken or flaky? Point EZTest at the failure report
+            and it will identify the bug, fix the source code, write a regression
+            test to make sure it never comes back, and confirm everything passes.
           </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Recurring failures, regressions after refactors, or flaky tests.
+          </div>
+          <button class="action-btn" id="btn-fix">Fix &amp; Validate &#8594;</button>
         </div>
-      </div>
 
-      <div class="btn-row">
-        <button class="btn btn-primary" id="step1ContinueBtn" disabled onclick="goToStep(2)">
-          Continue →
-        </button>
       </div>
     </div>
+  </div>
 
-    <!-- ══════════════════════════════════════════════════
-         Step 2 — Choose Workflow
-    ══════════════════════════════════════════════════ -->
-    <div class="step-panel" id="stepPanel2">
-      <div class="card">
-        <p class="section-title">Choose a Workflow</p>
-        <div class="workflow-grid">
 
-          <div class="workflow-card" id="wfInit" onclick="selectWorkflow('init')">
-            <span class="wf-emoji">📝</span>
-            <div class="wf-title">Generate Spec</div>
-            <div class="wf-desc">AI reads your source code and writes eztest-spec.md — start here</div>
-          </div>
-
-          <div class="workflow-card" id="wfPlan" onclick="selectWorkflow('plan')">
-            <span class="wf-emoji">📋</span>
-            <div class="wf-title">Preview Plan</div>
-            <div class="wf-desc">See what tests will be written before committing to full generation</div>
-          </div>
-
-          <div class="workflow-card" id="wfGenerate" onclick="selectWorkflow('generate')">
-            <span class="wf-emoji">🧪</span>
-            <div class="wf-title">Generate Tests</div>
-            <div class="wf-desc">AI reads your source code and writes Playwright tests</div>
-          </div>
-
-          <div class="workflow-card" id="wfRecord" onclick="selectWorkflow('record')">
-            <span class="wf-emoji">📹</span>
-            <div class="wf-title">Record Session</div>
-            <div class="wf-desc">Browse your app with a Flag button — records everything you do</div>
-          </div>
-
-          <div class="workflow-card" id="wfReplay" onclick="selectWorkflow('replay')">
-            <span class="wf-emoji">🔄</span>
-            <div class="wf-title">Replay &amp; Fix</div>
-            <div class="wf-desc">Feed a bug report → AI reproduces, fixes code, validates</div>
-          </div>
-
-        </div>
-      </div>
-
-      <div class="btn-row">
-        <button class="btn btn-secondary" onclick="goToStep(1)">← Back</button>
-        <button class="btn btn-primary" id="step2ConfigureBtn" disabled onclick="goToStep(3)">
-          Configure →
-        </button>
+  <!-- ─────────────────────────────────────────────────────────────────────
+       ACTION CONFIG OVERLAY
+       Shown when an action needs a URL or file path before it can run.
+       ───────────────────────────────────────────────────────────────────── -->
+  <div id="config-overlay" class="config-overlay" style="display:none">
+    <div class="config-card">
+      <div class="config-card-title" id="config-overlay-title"></div>
+      <div class="config-card-desc"  id="config-overlay-desc"></div>
+      <div id="config-overlay-fields"></div>
+      <div class="config-btn-row">
+        <button class="btn-ghost" id="config-cancel-btn">Cancel</button>
+        <button class="btn-primary" id="config-run-btn">Run &#8594;</button>
       </div>
     </div>
+  </div>
 
-    <!-- ══════════════════════════════════════════════════
-         Step 3 — Configure
-    ══════════════════════════════════════════════════ -->
-    <div class="step-panel" id="stepPanel3">
-      <div class="card">
-        <p class="section-title" id="step3Title">Configure</p>
-        <div id="step3Fields">
-          <!-- Fields rendered dynamically by renderConfigFields() -->
-        </div>
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       RUN OUTPUT MODAL
+       Streams live output from the CLI process; shown during any run.
+       ───────────────────────────────────────────────────────────────────── -->
+  <div id="run-modal" class="run-modal" style="display:none">
+    <div class="run-modal-inner">
+      <div class="run-modal-header">
+        <span class="run-modal-title" id="run-modal-title">
+          <span class="spinner"></span>Running...
+        </span>
+        <button class="run-modal-cancel-btn" id="run-cancel-btn">Cancel</button>
       </div>
-
-      <div class="btn-row">
-        <button class="btn btn-secondary" onclick="goToStep(2)">← Back</button>
-        <button class="btn btn-primary" onclick="startRun()">Run →</button>
-      </div>
-    </div>
-
-    <!-- ══════════════════════════════════════════════════
-         Step 4 — Run
-    ══════════════════════════════════════════════════ -->
-    <div class="step-panel" id="stepPanel4">
-      <div class="card">
-        <div class="run-status-row">
-          <div class="spinner" id="runSpinner"></div>
-          <span class="run-status-text" id="runStatusText">Starting…</span>
-        </div>
-        <div class="terminal-pane" id="terminalPane"></div>
-      </div>
-
-      <div class="btn-row">
-        <button class="btn btn-danger" id="stopBtn" onclick="cancelRun()">Stop</button>
-        <button class="btn btn-secondary" id="runAgainBtn" style="display:none" onclick="startRun()">Run Again</button>
-        <button class="btn btn-secondary" id="chooseWorkflowBtn" style="display:none" onclick="goToStep(2)">← Choose Workflow</button>
+      <div class="run-terminal" id="run-terminal"></div>
+      <div class="run-done-bar" id="run-done-bar" style="display:none">
+        <span id="run-done-msg"></span>
+        <button class="btn-ghost" onclick="closeRunModal()">Close</button>
       </div>
     </div>
+  </div>
 
-  </div><!-- /.wizard-container -->
 
-  <!-- Socket.io is auto-served by the UI server at this path -->
   <script src="/socket.io/socket.io.js"></script>
   <script>
-    // ── State ─────────────────────────────────────────────────────────────────
-    var currentStep = 1;
-    var selectedWorkflow = null;
-    var statusData = null;
-    var socket = io();
+    // ── Application state ────────────────────────────────────────────────────
 
-    // ── Step navigation ────────────────────────────────────────────────────────
-
-    function goToStep(stepNumber) {
-      document.getElementById('stepPanel' + currentStep).classList.remove('active');
-      currentStep = stepNumber;
-      document.getElementById('stepPanel' + currentStep).classList.add('active');
-      updateStepDots();
-      if (stepNumber === 3) { renderConfigFields(); }
-    }
-
-    function updateStepDots() {
-      for (var dotIndex = 1; dotIndex <= 4; dotIndex++) {
-        var dotElement = document.getElementById('dot' + dotIndex);
-        dotElement.classList.remove('active', 'complete');
-        if (dotIndex < currentStep) {
-          dotElement.classList.add('complete');
-        } else if (dotIndex === currentStep) {
-          dotElement.classList.add('active');
-        }
-      }
-    }
-
-    // ── Step 1: Fetch environment status ──────────────────────────────────────
-
-    function loadStatus() {
-      fetch('/api/status')
-        .then(function(response) { return response.json(); })
-        .then(function(data) {
-          statusData = data;
-          applyNodeStatus(data.node);
-          applyApiKeyStatus(data.apiKey);
-          applyPlaywrightStatus(data.playwright);
-          checkStep1AllPassing(data);
-        })
-        .catch(function() {
-          document.getElementById('nodeSubtitle').textContent = 'Could not reach server.';
-        });
-    }
-
-    function applyNodeStatus(nodeInfo) {
-      var iconEl    = document.getElementById('nodeIcon');
-      var subtitleEl = document.getElementById('nodeSubtitle');
-      if (nodeInfo.ok) {
-        iconEl.textContent = '\u2705';
-        subtitleEl.textContent = 'Running ' + nodeInfo.version;
-        subtitleEl.className = 'check-subtitle success-text';
-      } else {
-        iconEl.textContent = '\u274C';
-        subtitleEl.textContent = 'Node ' + nodeInfo.version + ' detected — v18 or newer required';
-        subtitleEl.className = 'check-subtitle error-text';
-      }
-    }
-
-    function applyApiKeyStatus(apiKeyInfo) {
-      var iconEl     = document.getElementById('apiKeyIcon');
-      var subtitleEl = document.getElementById('apiKeySubtitle');
-      var formEl     = document.getElementById('apiKeyForm');
-
-      // Auto-select whichever provider already has a key configured so the
-      // user sees a green checkmark immediately — no manual selection needed.
-      var providerSelect = document.getElementById('providerSelect');
-      if (apiKeyInfo.hasGithub) {
-        providerSelect.value = 'github';
-      } else if (apiKeyInfo.hasOpenAi) {
-        providerSelect.value = 'openai';
-      } else if (apiKeyInfo.hasAnthropic) {
-        providerSelect.value = 'anthropic';
-      }
-
-      if (apiKeyInfo.ok) {
-        var providerLabel = apiKeyInfo.hasGithub ? 'GitHub Copilot'
-                          : apiKeyInfo.hasOpenAi  ? 'OpenAI'
-                          : 'Anthropic';
-        iconEl.textContent = '\u2705';
-        subtitleEl.textContent = providerLabel + ' key found \u2014 ready to go!';
-        subtitleEl.className = 'check-subtitle success-text';
-        formEl.style.display = 'none';
-      } else {
-        iconEl.textContent = '\u274C';
-        subtitleEl.textContent = 'No API key found. Add one below or set EZTEST_GITHUB_TOKEN in .env';
-        subtitleEl.className = 'check-subtitle error-text';
-        formEl.style.display = 'flex';
-      }
-    }
-
-    function applyPlaywrightStatus(playwrightInfo) {
-      var iconEl     = document.getElementById('playwrightIcon');
-      var subtitleEl = document.getElementById('playwrightSubtitle');
-      if (playwrightInfo.installed) {
-        iconEl.textContent = '\u2705';
-        subtitleEl.textContent = 'Playwright is installed';
-        subtitleEl.className = 'check-subtitle success-text';
-      } else {
-        iconEl.textContent = '\u274C';
-        subtitleEl.textContent = 'Not found. Run: npx playwright install chromium';
-        subtitleEl.className = 'check-subtitle error-text';
-      }
-    }
-
-    function checkStep1AllPassing(data) {
-      var isAllPassing = data.node.ok && data.apiKey.ok && data.playwright.installed;
-      document.getElementById('step1ContinueBtn').disabled = !isAllPassing;
-    }
-
-    // ── Step 1: Save API key ───────────────────────────────────────────────────
-
-    function saveApiKey() {
-      var provider = document.getElementById('providerSelect').value;
-      var apiKey   = document.getElementById('apiKeyInput').value.trim();
-      if (!apiKey) { return; }
-
-      var saveBtn = document.getElementById('saveKeyBtn');
-      saveBtn.disabled = true;
-      saveBtn.textContent = 'Saving…';
-
-      fetch('/api/env', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: provider, apiKey: apiKey })
-      })
-        .then(function(response) { return response.json(); })
-        .then(function(result) {
-          if (result.saved) {
-            // Re-fetch status to re-evaluate checks
-            loadStatus();
-          }
-          saveBtn.disabled = false;
-          saveBtn.textContent = 'Save';
-        })
-        .catch(function() {
-          saveBtn.disabled = false;
-          saveBtn.textContent = 'Save';
-        });
-    }
-
-    // ── Step 2: Workflow selection ────────────────────────────────────────────
-
-    function selectWorkflow(workflowName) {
-      selectedWorkflow = workflowName;
-      var workflowIds = ['wfInit', 'wfPlan', 'wfGenerate', 'wfRecord', 'wfReplay'];
-      for (var wi = 0; wi < workflowIds.length; wi++) {
-        document.getElementById(workflowIds[wi]).classList.remove('selected');
-      }
-      var idMap = { init: 'wfInit', plan: 'wfPlan', generate: 'wfGenerate', record: 'wfRecord', replay: 'wfReplay' };
-      document.getElementById(idMap[workflowName]).classList.add('selected');
-      document.getElementById('step2ConfigureBtn').disabled = false;
-    }
-
-    // ── Step 3: Render config fields based on selected workflow ───────────────
-
-    function renderConfigFields() {
-      var fieldsContainer = document.getElementById('step3Fields');
-      var titleEl         = document.getElementById('step3Title');
-
-      fieldsContainer.innerHTML = '';
-
-      if (selectedWorkflow === 'init') {
-        titleEl.textContent = 'Configure: Generate Spec';
-        fieldsContainer.innerHTML =
-          buildTextField('configSource', 'Source Directory', './src', '') +
-          buildTextField('configOutput', 'Output File', './eztest-spec.md', '') +
-          buildCheckbox('configDryRun', 'Dry run — print spec without writing to disk', false);
-
-      } else if (selectedWorkflow === 'plan') {
-        titleEl.textContent = 'Configure: Preview Test Plan';
-        fieldsContainer.innerHTML =
-          buildTextField('configSource', 'Source Directory', './src', '') +
-          buildTextField('configUrl',    'Application URL',  'http://localhost:3000', '') +
-          buildTextField('configOutput', 'Save plan to file (optional)', '', './test-plan.md');
-
-      } else if (selectedWorkflow === 'generate') {
-        titleEl.textContent = 'Configure: Generate Tests';
-        fieldsContainer.innerHTML =
-          buildTextField('configSource', 'Source Directory', './src', '') +
-          buildTextField('configUrl',    'Application URL',  'http://localhost:3000', '') +
-          buildTextField('configOutput', 'Output Directory', './tests/generated', '') +
-          buildCheckbox('configRunAndFix', 'Run tests after generation and auto-fix selector failures (recommended)', true) +
-          buildCheckbox('configNoReview',  'Skip behavioral assertion review pass (faster, fewer API calls)', false);
-
-      } else if (selectedWorkflow === 'record') {
-        titleEl.textContent = 'Configure: Record Session';
-        fieldsContainer.innerHTML =
-          buildTextField('configUrl',    'Application URL',  'http://localhost:3000', '') +
-          buildTextField('configOutput', 'Output Directory', './bug-reports', '');
-
-      } else if (selectedWorkflow === 'replay') {
-        titleEl.textContent = 'Configure: Replay & Fix';
-        fieldsContainer.innerHTML =
-          buildTextField('configReport', 'Bug Report File', '', './bug-reports/bug-report-abc123.json') +
-          buildTextField('configSource', 'Source Directory', './src', '');
-      }
-    }
-
-    function buildTextField(fieldId, labelText, defaultValue, placeholderText) {
-      return '<div class="config-field">'
-        + '<label for="' + fieldId + '">' + labelText + '</label>'
-        + '<input type="text" id="' + fieldId + '"'
-        + ' value="' + defaultValue + '"'
-        + ' placeholder="' + placeholderText + '" />'
-        + '</div>';
-    }
-
-    function buildCheckbox(fieldId, labelText, isChecked) {
-      return '<div class="config-field config-checkbox">'
-        + '<label>'
-        + '<input type="checkbox" id="' + fieldId + '"' + (isChecked ? ' checked' : '') + ' />'
-        + ' ' + labelText
-        + '</label>'
-        + '</div>';
-    }
-
-    // ── Step 4: Start run ─────────────────────────────────────────────────────
-
-    function startRun() {
-      goToStep(4);
-      clearTerminal();
-      showRunning();
-
-      var config = { workflow: selectedWorkflow };
-
-      var sourceEl       = document.getElementById('configSource');
-      var urlEl          = document.getElementById('configUrl');
-      var outputEl       = document.getElementById('configOutput');
-      var reportEl       = document.getElementById('configReport');
-      var runAndFixEl    = document.getElementById('configRunAndFix');
-      var noReviewEl     = document.getElementById('configNoReview');
-      var dryRunEl       = document.getElementById('configDryRun');
-
-      if (sourceEl)    { config.source    = sourceEl.value; }
-      if (urlEl)       { config.url       = urlEl.value; }
-      if (outputEl)    { config.output    = outputEl.value; }
-      if (reportEl)    { config.report    = reportEl.value; }
-      if (runAndFixEl) { config.runAndFix = runAndFixEl.checked; }
-      if (noReviewEl)  { config.noReview  = noReviewEl.checked; }
-      if (dryRunEl)    { config.dryRun    = dryRunEl.checked; }
-
-      socket.emit('run:start', config);
-    }
-
-    function cancelRun() {
-      socket.emit('run:cancel');
-    }
-
-    function showRunning() {
-      document.getElementById('runSpinner').classList.remove('hidden');
-      document.getElementById('runStatusText').textContent = 'Running…';
-      document.getElementById('stopBtn').style.display = 'inline-flex';
-      document.getElementById('runAgainBtn').style.display = 'none';
-      document.getElementById('chooseWorkflowBtn').style.display = 'none';
-    }
-
-    function showRunComplete(exitCode) {
-      document.getElementById('runSpinner').classList.add('hidden');
-      var isSuccess = exitCode === 0;
-      document.getElementById('runStatusText').textContent =
-        isSuccess ? '\u2705 Completed successfully' : '\u274C Finished with errors (exit code ' + exitCode + ')';
-      document.getElementById('stopBtn').style.display = 'none';
-      document.getElementById('runAgainBtn').style.display = 'inline-flex';
-      document.getElementById('chooseWorkflowBtn').style.display = 'inline-flex';
-    }
-
-    // ── Terminal helpers ───────────────────────────────────────────────────────
-
-    function clearTerminal() {
-      document.getElementById('terminalPane').innerHTML = '';
-    }
-
-    function appendLog(level, message) {
-      var terminalPaneEl = document.getElementById('terminalPane');
-      var lineEl = document.createElement('p');
-      lineEl.className = 'log-line log-' + level;
-      lineEl.textContent = message;
-      terminalPaneEl.appendChild(lineEl);
-      // Auto-scroll to newest log line
-      terminalPaneEl.scrollTop = terminalPaneEl.scrollHeight;
-    }
-
-    // ── Socket.io events ──────────────────────────────────────────────────────
-
-    socket.on('run:log', function(payload) {
-      appendLog(payload.level, payload.message);
-    });
-
-    socket.on('run:done', function(payload) {
-      showRunComplete(payload.exitCode);
-    });
+    var appConfig   = null;   // saved project path, appUrl
+    var statusData  = null;   // node / apiKey / playwright status
+    var scanResult  = null;   // scanned project info
+    var isRunning   = false;
+    var socket      = io();
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
-    loadStatus();
+    /**
+     * Entry point. Loads environment status and saved project config in parallel,
+     * then decides whether to show onboarding (first launch) or the dashboard.
+     */
+    function initApp() {
+      Promise.all([
+        fetch('/api/app-config').then(function(r) { return r.json(); }),
+        fetch('/api/status').then(function(r) { return r.json(); })
+      ]).then(function(results) {
+        appConfig  = results[0];
+        statusData = results[1];
+        if (appConfig && appConfig.isConfigured && appConfig.scanResult) {
+          scanResult = appConfig.scanResult;
+          showDashboard();
+        } else {
+          showOnboarding(1);
+        }
+      }).catch(function() {
+        showOnboarding(1);
+      });
+    }
+
+    // ── Onboarding flow ───────────────────────────────────────────────────────
+
+    /** Shows the onboarding overlay and jumps to the given step (1 or 2). */
+    function showOnboarding(stepNumber) {
+      document.getElementById('app').style.display         = 'none';
+      document.getElementById('onboarding').style.display  = 'flex';
+      document.getElementById('ob-step-folder').style.display   = stepNumber === 1 ? 'block' : 'none';
+      document.getElementById('ob-step-provider').style.display = stepNumber === 2 ? 'block' : 'none';
+    }
+
+    /**
+     * Opens the native Windows folder browser dialog via the server.
+     * When a folder is picked, scans it and shows the detected project card.
+     */
+    function browseForProjectFolder() {
+      var btn = document.getElementById('browse-folder-btn');
+      btn.disabled    = true;
+      btn.textContent = 'Opening\u2026';
+
+      fetch('/api/browse-folder', { method: 'POST' })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          btn.disabled    = false;
+          btn.textContent = 'Browse for project folder';
+          if (!result.cancelled && result.path) {
+            saveProjectAndScan(result.path);
+          }
+        })
+        .catch(function() {
+          btn.disabled    = false;
+          btn.textContent = 'Browse for project folder';
+        });
+    }
+
+    /**
+     * Saves the chosen project path via the API, then renders the detected
+     * project summary card in the onboarding screen.
+     */
+    function saveProjectAndScan(projectPath) {
+      fetch('/api/app-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath: projectPath })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(result) {
+          if (result.scanResult) {
+            scanResult = result.scanResult;
+            appConfig  = Object.assign({}, appConfig, {
+              projectPath:  projectPath,
+              isConfigured: true,
+              scanResult:   scanResult
+            });
+            renderDetectedProjectCard(scanResult);
+            document.getElementById('ob-step-folder-next').style.display = 'block';
+          }
+        });
+    }
+
+    /** Fills in the "project detected" card shown after a folder is selected. */
+    function renderDetectedProjectCard(scan) {
+      var card = document.getElementById('detected-project-card');
+      card.style.display = 'block';
+      card.innerHTML =
+        '<div class="detected-project-card">'
+        + '<div class="detected-project-name">\u2705 ' + escapeHtml(scan.projectName) + '</div>'
+        + '<div class="detected-project-stats">'
+        + '<div class="detected-stat">' + escapeHtml(scan.detectedFramework) + ' &middot; ' + escapeHtml(scan.language) + '</div>'
+        + '<div class="detected-stat"><strong>' + scan.componentFileCount + '</strong> source files</div>'
+        + '<div class="detected-stat"><strong>' + scan.existingTestFileCount + '</strong> existing tests</div>'
+        + '</div>'
+        + '</div>';
+    }
+
+    /** Moves from folder step to provider step, auto-detecting key status. */
+    function goToProviderStep() {
+      showOnboarding(2);
+
+      var autoStatus = document.getElementById('ai-auto-status');
+      var manualForm = document.getElementById('ai-manual-form');
+
+      if (statusData && statusData.apiKey && statusData.apiKey.ok) {
+        var providerLabel = statusData.apiKey.hasGithub   ? 'GitHub Copilot'
+                          : statusData.apiKey.hasOpenAi   ? 'OpenAI'
+                          : 'Anthropic';
+        autoStatus.innerHTML =
+          '<div class="ai-status-card is-ready">'
+          + '<div class="ai-status-icon">\u2705</div>'
+          + '<div>'
+          + '<div class="ai-status-label">' + escapeHtml(providerLabel) + ' is connected</div>'
+          + '<div class="ai-status-sublabel">Your API key was found automatically \u2014 nothing to do here.</div>'
+          + '</div>'
+          + '</div>';
+        manualForm.style.display = 'none';
+      } else {
+        autoStatus.innerHTML =
+          '<div class="ai-status-card">'
+          + '<div class="ai-status-icon">&#x1F511;</div>'
+          + '<div>'
+          + '<div class="ai-status-label">No API key found</div>'
+          + '<div class="ai-status-sublabel">Add one below to enable AI-powered test generation.</div>'
+          + '</div>'
+          + '</div>';
+        manualForm.style.display = 'block';
+      }
+    }
+
+    /**
+     * Completes onboarding: saves an API key if the user typed one,
+     * then transitions to the main dashboard.
+     */
+    function finishOnboarding() {
+      var providerSelect = document.getElementById('ob-provider-select');
+      var keyInput       = document.getElementById('ob-api-key');
+
+      if (providerSelect && keyInput && keyInput.value.trim()) {
+        fetch('/api/env', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ provider: providerSelect.value, apiKey: keyInput.value.trim() })
+        });
+        // Update local status so the dashboard reflects the new key
+        if (statusData) { statusData.apiKey = { ok: true }; }
+      }
+
+      document.getElementById('onboarding').style.display = 'none';
+      showDashboard();
+    }
+
+    // ── Dashboard ─────────────────────────────────────────────────────────────
+
+    /** Transitions to the main app dashboard and renders the project summary bar. */
+    function showDashboard() {
+      document.getElementById('onboarding').style.display = 'none';
+      document.getElementById('app').style.display        = 'block';
+
+      if (scanResult) {
+        renderProjectSummaryBar(scanResult);
+        document.getElementById('project-pill-name').textContent = escapeHtml(scanResult.projectName);
+        document.getElementById('project-pill-name').className   = 'project-pill-name';
+      }
+    }
+
+    /** Renders the stats bar at the top of the dashboard. */
+    function renderProjectSummaryBar(scan) {
+      var bar = document.getElementById('project-summary-bar');
+      bar.style.display = 'flex';
+      bar.innerHTML =
+        '<div class="summary-stat">'
+        + '<div class="summary-stat-label">Project</div>'
+        + '<div class="summary-stat-value">' + escapeHtml(scan.projectName) + '</div>'
+        + '</div>'
+        + '<div class="summary-divider"></div>'
+        + '<div class="summary-stat">'
+        + '<div class="summary-stat-label">Framework</div>'
+        + '<div class="summary-stat-value">' + escapeHtml(scan.detectedFramework) + ' \u00B7 ' + escapeHtml(scan.language) + '</div>'
+        + '</div>'
+        + '<div class="summary-divider"></div>'
+        + '<div class="summary-stat">'
+        + '<div class="summary-stat-label">Source Files</div>'
+        + '<div class="summary-stat-value">' + scan.componentFileCount + '</div>'
+        + '</div>'
+        + '<div class="summary-divider"></div>'
+        + '<div class="summary-stat">'
+        + '<div class="summary-stat-label">Existing Tests</div>'
+        + '<div class="summary-stat-value">' + (scan.existingTestFileCount === 0 ? 'None yet' : String(scan.existingTestFileCount)) + '</div>'
+        + '</div>';
+    }
+
+    // ── Action card handlers ───────────────────────────────────────────────────
+
+    /**
+     * Runs the AI test generation workflow immediately using the
+     * scanned source directory as input — no additional config needed.
+     */
+    function handleGenerateTests() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+      var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
+      var outputDir = appConfig.projectPath + '/tests/';
+      startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir });
+    }
+
+    /**
+     * Runs the AI spec preview — same as generate but dry-run mode
+     * so the user can see the plan before any files are written.
+     */
+    function handlePreviewPlan() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+      var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
+      startRun('Previewing test plan\u2026', { workflow: 'generate', source: sourceDir, dryRun: true });
+    }
+
+    /**
+     * Opens the config overlay for "Record a Session" so the user can
+     * enter their app's URL before the browser is launched.
+     */
+    function handleRecord() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+
+      openConfigOverlay(
+        'Start Recording a Session',
+        'Enter your app\'s URL. EZTest will open it in a browser where you can click around and flag anything that looks wrong.',
+        function(container) {
+          container.innerHTML =
+            '<div class="config-input-row">'
+            + '<label>Your app URL</label>'
+            + '<div class="config-input-wrap">'
+            + '<input class="config-input" type="url" id="cfg-url" placeholder="http://localhost:3000" value="' + escapeAttr(appConfig.appUrl || '') + '" />'
+            + '</div>'
+            + '</div>';
+        },
+        function() {
+          var urlValue = document.getElementById('cfg-url').value.trim();
+          if (!urlValue) { document.getElementById('cfg-url').focus(); return false; }
+          // Persist URL so it pre-fills next time
+          fetch('/api/app-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ appUrl: urlValue })
+          });
+          appConfig.appUrl = urlValue;
+          startRun('Recording session\u2026', { workflow: 'record', url: urlValue });
+          return true;
+        }
+      );
+    }
+
+    /**
+     * Opens the config overlay for "Fix a Failing Test" so the user can
+     * choose a report file from a previous failing run.
+     */
+    function handleFixTest() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+
+      openConfigOverlay(
+        'Fix a Failing Test',
+        'Select the test report JSON file from a previous failed run. Reports are saved in the test-results/ folder inside your EZTest installation.',
+        function(container) {
+          container.innerHTML =
+            '<div class="config-input-row">'
+            + '<label>Failure report file</label>'
+            + '<div class="config-input-wrap">'
+            + '<input class="config-input" type="text" id="cfg-report" placeholder="test-results/..." />'
+            + '<button class="config-browse-btn" id="cfg-report-browse-btn">Browse</button>'
+            + '</div>'
+            + '</div>';
+
+          // Wire up the browse button after the DOM is updated
+          setTimeout(function() {
+            var browseBtn = document.getElementById('cfg-report-browse-btn');
+            if (browseBtn) {
+              browseBtn.onclick = function() {
+                browseBtn.textContent = 'Opening\u2026';
+                browseBtn.disabled = true;
+                fetch('/api/browse-file', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ filter: 'JSON reports|*.json|All files|*.*' })
+                })
+                  .then(function(r) { return r.json(); })
+                  .then(function(result) {
+                    browseBtn.textContent = 'Browse';
+                    browseBtn.disabled = false;
+                    if (!result.cancelled && result.path) {
+                      document.getElementById('cfg-report').value = result.path;
+                    }
+                  })
+                  .catch(function() { browseBtn.textContent = 'Browse'; browseBtn.disabled = false; });
+              };
+            }
+          }, 50);
+        },
+        function() {
+          var reportValue = document.getElementById('cfg-report').value.trim();
+          if (!reportValue) { document.getElementById('cfg-report').focus(); return false; }
+          startRun('Fixing failing test\u2026', {
+            workflow: 'replay',
+            report:   reportValue,
+            source:   appConfig.projectPath
+          });
+          return true;
+        }
+      );
+    }
+
+    // ── Config overlay ────────────────────────────────────────────────────────
+
+    /** Active "run" callback stored while the config overlay is open. */
+    var activeConfigRunFn = null;
+
+    /**
+     * Opens the action config overlay with a custom title, description,
+     * and field-builder function. The onRun callback is called when the
+     * user clicks "Run" and should return false to cancel (e.g. validation fail).
+     */
+    function openConfigOverlay(title, description, buildFields, onRun) {
+      document.getElementById('config-overlay-title').textContent = title;
+      document.getElementById('config-overlay-desc').textContent  = description;
+      buildFields(document.getElementById('config-overlay-fields'));
+      activeConfigRunFn = onRun;
+      document.getElementById('config-overlay').style.display = 'flex';
+    }
+
+    function closeConfigOverlay() {
+      document.getElementById('config-overlay').style.display = 'none';
+      activeConfigRunFn = null;
+    }
+
+    // ── Run output modal ──────────────────────────────────────────────────────
+
+    /**
+     * Emits a run:start event to the server and opens the output modal.
+     * Clears previous output so every run starts fresh.
+     */
+    function startRun(titleText, runConfig) {
+      if (isRunning) { return; }
+      isRunning = true;
+
+      document.getElementById('run-modal-title').innerHTML = '<span class="spinner"></span>' + escapeHtml(titleText);
+      document.getElementById('run-terminal').innerHTML    = '';
+      document.getElementById('run-done-bar').style.display = 'none';
+      document.getElementById('run-cancel-btn').style.display = 'block';
+      document.getElementById('run-modal').style.display     = 'flex';
+
+      socket.emit('run:start', runConfig);
+    }
+
+    function appendLogLine(level, message) {
+      var terminal = document.getElementById('run-terminal');
+      var line     = document.createElement('div');
+      line.className   = 'log-' + level;
+      line.textContent = message;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    }
+
+    function closeRunModal() {
+      document.getElementById('run-modal').style.display = 'none';
+      isRunning = false;
+    }
+
+    // ── Socket events ─────────────────────────────────────────────────────────
+
+    socket.on('run:log', function(data) {
+      appendLogLine(data.level, data.message);
+    });
+
+    socket.on('run:done', function(data) {
+      isRunning = false;
+      var doneBar  = document.getElementById('run-done-bar');
+      var doneMsg  = document.getElementById('run-done-msg');
+      var cancelBtn = document.getElementById('run-cancel-btn');
+
+      doneBar.style.display        = 'flex';
+      cancelBtn.style.display      = 'none';
+      document.getElementById('run-modal-title').textContent = 'Run complete';
+
+      if (data.exitCode === 0) {
+        doneMsg.className   = 'run-result-success';
+        doneMsg.textContent = '\u2705 Completed successfully';
+      } else if (data.exitCode === 130) {
+        doneMsg.className   = 'run-result-warning';
+        doneMsg.textContent = 'Cancelled';
+      } else {
+        doneMsg.className   = 'run-result-failure';
+        doneMsg.textContent = '\u274C Finished with errors (exit code ' + data.exitCode + ')';
+      }
+    });
+
+    // ── Utility helpers ───────────────────────────────────────────────────────
+
+    /** Escapes HTML special characters to prevent XSS from path/name values. */
+    function escapeHtml(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    }
+
+    /** Escapes a value for safe use inside an HTML attribute. */
+    function escapeAttr(text) {
+      return String(text)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;');
+    }
+
+    // ── Wire up event listeners ───────────────────────────────────────────────
+
+    document.addEventListener('DOMContentLoaded', function() {
+      // Onboarding buttons
+      document.getElementById('browse-folder-btn').addEventListener('click', browseForProjectFolder);
+      document.getElementById('goto-provider-btn').addEventListener('click', goToProviderStep);
+      document.getElementById('ob-back-btn').addEventListener('click', function() { showOnboarding(1); });
+      document.getElementById('ob-finish-btn').addEventListener('click', finishOnboarding);
+
+      // App bar
+      document.getElementById('change-project-btn').addEventListener('click', function() {
+        showOnboarding(1);
+        document.getElementById('detected-project-card').style.display   = 'none';
+        document.getElementById('ob-step-folder-next').style.display = 'none';
+      });
+
+      // Action card buttons
+      document.getElementById('btn-generate').addEventListener('click', handleGenerateTests);
+      document.getElementById('btn-preview-plan').addEventListener('click', handlePreviewPlan);
+      document.getElementById('btn-record').addEventListener('click', handleRecord);
+      document.getElementById('btn-fix').addEventListener('click', handleFixTest);
+
+      // Config overlay
+      document.getElementById('config-cancel-btn').addEventListener('click', closeConfigOverlay);
+      document.getElementById('config-run-btn').addEventListener('click', function() {
+        if (activeConfigRunFn) {
+          var shouldClose = activeConfigRunFn();
+          if (shouldClose !== false) { closeConfigOverlay(); }
+        }
+      });
+
+      // Run modal cancel
+      document.getElementById('run-cancel-btn').addEventListener('click', function() {
+        socket.emit('run:cancel');
+      });
+
+      // Boot the app
+      initApp();
+    });
   </script>
+
 </body>
 </html>`;
 }

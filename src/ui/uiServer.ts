@@ -1,16 +1,42 @@
 /**
- * UI Server — local Express + Socket.io server that powers the EZTest wizard.
- * Serves the wizard HTML page and provides the API + real-time log streaming
+ * UI Server — local Express + Socket.io server that powers the EZTest application.
+ * Serves the main app page and provides the API + real-time log streaming
  * that lets users run EZTest workflows without touching the terminal.
  */
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import express from 'express';
 import { Server as SocketIoServer } from 'socket.io';
 import { buildWizardPageHtml } from './wizardPage.js';
+
+// ── App-level config types ─────────────────────────────────────────────────────
+
+/**
+ * Settings EZTest remembers between sessions: which project to use,
+ * what URL the user's app runs on, etc. Stored in app-config.json
+ * in the EZTest install directory (never committed to git).
+ */
+interface AppConfig {
+  projectPath: string | null;
+  appUrl:      string | null;
+}
+
+/**
+ * What EZTest learns about the user's project by reading its files —
+ * framework, language, file counts, etc. Recomputed on every load
+ * so it stays accurate as the project changes.
+ */
+interface ProjectScanResult {
+  projectName:           string;
+  detectedFramework:     string;
+  language:              string;
+  componentFileCount:    number;
+  existingTestFileCount: number;
+  sourceDirectory:       string;
+}
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -166,6 +192,104 @@ function persistEnvKey(envKey: string, envValue: string): void {
   process.env[envKey] = envValue;
 }
 
+// ── App config helpers ─────────────────────────────────────────────────────────
+
+/** Path where EZTest stores its own settings (never the user's project folder). */
+const APP_CONFIG_FILE_PATH = join(process.cwd(), 'app-config.json');
+
+/** Reads the saved app config, returning empty defaults if the file is missing. */
+function readAppConfig(): AppConfig {
+  try {
+    if (existsSync(APP_CONFIG_FILE_PATH)) {
+      return JSON.parse(readFileSync(APP_CONFIG_FILE_PATH, 'utf-8')) as AppConfig;
+    }
+  } catch { /* return defaults on any read/parse error */ }
+  return { projectPath: null, appUrl: null };
+}
+
+/** Writes the app config to disk. */
+function writeAppConfig(config: AppConfig): void {
+  writeFileSync(APP_CONFIG_FILE_PATH, JSON.stringify(config, null, 2), 'utf-8');
+}
+
+/**
+ * Recursively counts files matching any of the given extensions under a
+ * directory, skipping excluded folder names (e.g. node_modules) and
+ * stopping at depthLimit to avoid hanging on very deep trees.
+ */
+function countFilesWithExtensions(
+  dir: string,
+  extensions: string[],
+  excludedDirNames: string[],
+  depthLimit: number,
+): number {
+  if (depthLimit <= 0) { return 0; }
+  let count = 0;
+  let entries: string[];
+  try { entries = readdirSync(dir); } catch { return 0; }
+
+  for (const entry of entries) {
+    if (excludedDirNames.includes(entry)) { continue; }
+    const fullPath = join(dir, entry);
+    try {
+      const fileStats = statSync(fullPath);
+      if (fileStats.isDirectory()) {
+        count += countFilesWithExtensions(fullPath, extensions, excludedDirNames, depthLimit - 1);
+      } else if (extensions.some(ext => entry.endsWith(ext))) {
+        count++;
+      }
+    } catch { continue; }
+  }
+  return count;
+}
+
+/**
+ * Reads a project folder and returns human-readable information about it:
+ * framework, language, source file count, and existing test count.
+ */
+function scanProjectDirectory(projectPath: string): ProjectScanResult {
+  const packageJsonPath = join(projectPath, 'package.json');
+  let projectName       = 'My Project';
+  let detectedFramework = 'Web App';
+  const language        = existsSync(join(projectPath, 'tsconfig.json')) ? 'TypeScript' : 'JavaScript';
+
+  if (existsSync(packageJsonPath)) {
+    try {
+      const packageContent = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as Record<string, unknown>;
+      if (typeof packageContent['name'] === 'string' && packageContent['name']) {
+        // Convert kebab-case package names to Title Case for display
+        projectName = (packageContent['name'] as string)
+          .split(/[-_]/)
+          .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+          .join(' ');
+      }
+      const allDeps: Record<string, string> = {
+        ...packageContent['dependencies'] as Record<string, string> ?? {},
+        ...packageContent['devDependencies'] as Record<string, string> ?? {},
+      };
+      if (allDeps['next'])               { detectedFramework = 'Next.js'; }
+      else if (allDeps['react'])         { detectedFramework = 'React'; }
+      else if (allDeps['vue'])           { detectedFramework = 'Vue'; }
+      else if (allDeps['@angular/core']) { detectedFramework = 'Angular'; }
+      else if (allDeps['svelte'])        { detectedFramework = 'Svelte'; }
+      else if (allDeps['express'] || allDeps['fastify'] || allDeps['koa']) {
+        detectedFramework = 'Node API';
+      }
+    } catch { /* leave defaults if package.json is malformed */ }
+  }
+
+  // Prefer /src if it exists, otherwise scan the root (excluding noise dirs)
+  const sourceDirectory    = existsSync(join(projectPath, 'src')) ? join(projectPath, 'src') : projectPath;
+  const componentExtensions = ['.tsx', '.jsx', '.vue', '.svelte', '.ts', '.js'];
+  const testExtensions      = ['.spec.ts', '.spec.js', '.test.ts', '.test.js', '.spec.tsx', '.test.tsx'];
+  const excludedDirs        = ['node_modules', '.git', 'dist', 'build', '.next', 'out', 'coverage', '.nuxt'];
+
+  const componentFileCount    = countFilesWithExtensions(sourceDirectory, componentExtensions, excludedDirs, 6);
+  const existingTestFileCount = countFilesWithExtensions(projectPath,     testExtensions,      excludedDirs, 6);
+
+  return { projectName, detectedFramework, language, componentFileCount, existingTestFileCount, sourceDirectory };
+}
+
 // ── Server factory ─────────────────────────────────────────────────────────────
 
 /**
@@ -240,6 +364,107 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     persistEnvKey('EZTEST_AI_PROVIDER', provider);
 
     res.json({ saved: true });
+  });
+
+  // ── GET /api/app-config — returns saved project path + scan result ────────
+  expressApp.get('/api/app-config', (_req, res) => {
+    const config = readAppConfig();
+    if (config.projectPath && existsSync(config.projectPath)) {
+      const scanResult = scanProjectDirectory(config.projectPath);
+      res.json({ ...config, isConfigured: true, scanResult });
+    } else {
+      res.json({ projectPath: null, appUrl: null, isConfigured: false, scanResult: null });
+    }
+  });
+
+  // ── POST /api/app-config — saves project path and/or app URL ─────────────
+  expressApp.post('/api/app-config', (req, res) => {
+    const { projectPath, appUrl } = req.body as { projectPath?: string; appUrl?: string };
+    const existing = readAppConfig();
+    const updated: AppConfig = {
+      projectPath: projectPath !== undefined ? projectPath : existing.projectPath,
+      appUrl:      appUrl      !== undefined ? appUrl      : existing.appUrl,
+    };
+    writeAppConfig(updated);
+
+    if (updated.projectPath && existsSync(updated.projectPath)) {
+      const scanResult = scanProjectDirectory(updated.projectPath);
+      res.json({ saved: true, scanResult });
+    } else {
+      res.json({ saved: true, scanResult: null });
+    }
+  });
+
+  // ── POST /api/browse-folder — opens native Windows folder picker ──────────
+  // Uses PowerShell's WinForms FolderBrowserDialog — no SDK required on Windows.
+  expressApp.post('/api/browse-folder', (_req, res) => {
+    const psCommand = [
+      'Add-Type -AssemblyName System.Windows.Forms;',
+      '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
+      '$d.Description = "Select your project root folder";',
+      '$d.ShowNewFolderButton = $false;',
+      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
+      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }',
+    ].join(' ');
+
+    const pickerProcess = spawn(
+      'powershell',
+      ['-Sta', '-NoProfile', '-NonInteractive', '-Command', psCommand],
+      { stdio: ['ignore', 'pipe', 'ignore'], shell: false },
+    );
+
+    let selectedPath = '';
+    pickerProcess.stdout?.on('data', (chunk: Buffer) => { selectedPath += chunk.toString(); });
+
+    pickerProcess.on('close', () => {
+      const trimmedPath = selectedPath.trim();
+      if (trimmedPath && existsSync(trimmedPath)) {
+        res.json({ path: trimmedPath, cancelled: false });
+      } else {
+        res.json({ path: null, cancelled: true });
+      }
+    });
+
+    pickerProcess.on('error', () => {
+      res.json({ path: null, cancelled: true, error: 'Could not open folder picker' });
+    });
+  });
+
+  // ── POST /api/browse-file — opens native Windows file picker ─────────────
+  expressApp.post('/api/browse-file', (req, res) => {
+    const { filter = 'All files|*.*' } = req.body as { filter?: string };
+    const safeFilter = filter.replace(/'/g, '');
+
+    const psCommand = [
+      'Add-Type -AssemblyName System.Windows.Forms;',
+      '$d = New-Object System.Windows.Forms.OpenFileDialog;',
+      '$d.Title = "Select a file";',
+      '$d.Filter = \'' + safeFilter + '\';',
+      '[void][System.Windows.Forms.Application]::EnableVisualStyles();',
+      'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }',
+    ].join(' ');
+
+    const pickerProcess = spawn(
+      'powershell',
+      ['-Sta', '-NoProfile', '-NonInteractive', '-Command', psCommand],
+      { stdio: ['ignore', 'pipe', 'ignore'], shell: false },
+    );
+
+    let selectedFile = '';
+    pickerProcess.stdout?.on('data', (chunk: Buffer) => { selectedFile += chunk.toString(); });
+
+    pickerProcess.on('close', () => {
+      const trimmedFile = selectedFile.trim();
+      if (trimmedFile && existsSync(trimmedFile)) {
+        res.json({ path: trimmedFile, cancelled: false });
+      } else {
+        res.json({ path: null, cancelled: true });
+      }
+    });
+
+    pickerProcess.on('error', () => {
+      res.json({ path: null, cancelled: true, error: 'Could not open file picker' });
+    });
   });
 
   // ── Socket.io — real-time run streaming ───────────────────────────────────
