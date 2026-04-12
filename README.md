@@ -63,7 +63,16 @@ npx eztest --help
 
 ## Quick Start
 
-### 1. Generate tests from source code
+### Option A — Double-click launcher (no terminal required)
+
+If you cloned this repository, just double-click **`Launch EZTest.bat`** in the project folder. It will:
+1. Build EZTest on first run (takes ~10 seconds once)
+2. Start the wizard server
+3. Open your browser automatically to the setup wizard
+
+That's it — no terminal, no commands.
+
+### Option B — Command line
 
 Point EZTest at your source code and a running app URL. It reads your components, infers what users can do, and writes Playwright tests:
 
