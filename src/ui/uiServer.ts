@@ -292,6 +292,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
         activeChildProcess = null;
         clientSocket.emit('run:log', { level: 'warning' as LogLevel, message: 'Run cancelled by user.' });
         clientSocket.emit('run:done', { exitCode: 130 }); // 130 = killed by Ctrl+C
+      } else {
+        // Notify the client there was nothing to cancel — avoids a silent no-op
+        clientSocket.emit('run:log', { level: 'warning' as LogLevel, message: 'No active run to cancel.' });
       }
     });
   });
