@@ -67,24 +67,54 @@ EXAMPLES of good assertions (write these instead):
 // ── Max Source Code Characters Per Component ──────────────────────────────
 
 /**
- * How many characters of source code to include per component.
- * Modern AI models support large context windows — 3000 chars was far too small
- * for real components. 8000 chars captures most real-world component files fully.
- * This constant makes the limit easy to adjust without hunting through prompts.
+ * How many characters of source code to include per component in SINGLE-COMPONENT prompts
+ * (e.g., the component intent analysis step). These calls only analyze one component at a
+ * time, so they can afford a much larger excerpt without hitting API token limits.
  */
 const MAX_SOURCE_CHARS_PER_COMPONENT = 8000;
 
+/**
+ * How many characters of source code to include per component when ALL components are
+ * sent together in a BATCH prompt (e.g., user flow generation).
+ *
+ * The GitHub Models API has an 8000-token input limit. With 20-30 components in one call,
+ * each component can only budget ~200-300 tokens of source. At ~4 chars per token, 400 chars
+ * gives the AI enough business context (the component's JSX structure and key handlers)
+ * without blowing the request size limit.
+ *
+ * Quality trade-off: less source context means fewer nuanced insights, but the element list
+ * (which is always fully included) carries most of the actionable signal for flow generation.
+ */
+const MAX_BATCH_SOURCE_CHARS_PER_COMPONENT = 400;
+
 // ── App Spec Injection Helper ──────────────────────────────────────────────
+
+/**
+ * Compact system prompt for the flow-mapping stage.
+ *
+ * The full BEHAVIORAL_QA_SYSTEM_PROMPT is ~875 tokens — too large when combined with
+ * 20+ components and an app spec in a single 8K-token request to GitHub Models.
+ * This prompt conveys the essential instruction (produce JSON flows) in ~150 tokens,
+ * leaving the budget for component data and app spec context where the quality signal is.
+ */
+const FLOW_GENERATION_SYSTEM_PROMPT = `You are a QA engineer mapping application components to user flows.
+Your job: given a list of UI components with their interactive elements, identify the complete set of user journeys to test.
+A user flow is a sequence of actions a real user takes to accomplish a goal across one or more pages.
+Respond ONLY with a valid JSON array. No markdown, no explanation.`;
 
 /**
  * Formats the optional app spec (README / eztest-spec.md) into a prompt section.
  * The app spec is the single biggest quality lever — it gives the AI the business
  * intent of the application, not just what the code does mechanically.
+ *
+ * @param maxChars - Maximum characters to include. Defaults to 2000 (≈500 tokens) which
+ *   keeps the app spec within the 8K-token GitHub Models input limit when combined with
+ *   the flow-generation system prompt and 20-30 component summaries.
  */
-function formatAppSpecSection(appSpec: string | undefined): string {
+function formatAppSpecSection(appSpec: string | undefined, maxChars = 2000): string {
   if (!appSpec) return '';
-  return `\nAPPLICATION SPECIFICATION (what this app is designed to do — use this to understand user goals):
-${appSpec.slice(0, 5000)}
+  return `\nAPP PURPOSE (use this to understand what users are trying to do):
+${appSpec.slice(0, maxChars)}
 
 `;
 }
@@ -187,8 +217,14 @@ export function buildUserFlowGenerationPrompt(
   targetAppUrl: string,
   appSpec?: string,
 ): AiMessage[] {
-  // Include richer context per component: elements + key source excerpt
-  // Giving the AI more source context produces dramatically better cross-component flows
+  // In batch flow generation, we send ALL components in one call. Source code is omitted
+  // because including even a small excerpt per component pushes the request past the
+  // GitHub Models 8K-token input limit (system prompt alone is ~700 tokens, plus 26
+  // components × element list = another 1300+ tokens).
+  //
+  // The element list (kind, label, handler name) carries the essential behavioral signal
+  // the AI needs to identify user flows. The app spec (README) provides the business
+  // context that source excerpts were previously approximating.
   const componentSummaries = componentAnalyses
     .map(analysis => {
       const elementList = analysis.interactiveElements
@@ -201,67 +237,36 @@ export function buildUserFlowGenerationPrompt(
         })
         .join('\n');
 
-      // Include a meaningful excerpt of the source to give the AI business context
-      const sourceExcerpt = analysis.sourceCode.slice(0, 1500);
-
       return `### ${analysis.componentName}${analysis.routePath ? ` (route: ${analysis.routePath})` : ''}
 Elements:
-${elementList}
-Source excerpt:
-\`\`\`
-${sourceExcerpt}
-\`\`\``;
+${elementList}`;
     })
     .join('\n\n');
 
   return [
     {
       role: 'system',
-      content: BEHAVIORAL_QA_SYSTEM_PROMPT,
+      // Use the compact prompt — the full BEHAVIORAL_QA_SYSTEM_PROMPT is too long for
+      // batch calls that already carry 20+ components + app spec within the 8K token limit.
+      content: FLOW_GENERATION_SYSTEM_PROMPT,
     },
     {
       role: 'user',
-      content: `Based on these application components, identify the complete set of USER FLOWS to test.
-${formatAppSpecSection(appSpec)}
-BASE URL: ${targetAppUrl}
+      content: `Identify all USER FLOWS for this application.
+${formatAppSpecSection(appSpec)}BASE URL: ${targetAppUrl}
 
 COMPONENTS:
 ${componentSummaries}
 
-A user flow is a sequence of actions a real user takes to accomplish a goal (e.g., "Add item to cart and checkout").
+COVERAGE REQUIREMENTS:
+For EVERY happy-path flow, also generate:
+1. An ERROR-CASE flow: user sees a meaningful error message (bad input, unauthorized, network error)
+2. An EDGE-CASE flow: empty state, boundary value, or already-completed action
 
-MANDATORY COVERAGE REQUIREMENTS:
-For EVERY happy-path flow you identify, you MUST ALSO generate:
-1. At least one ERROR-CASE flow: what happens when the action fails? (bad input, unauthorized, network error, server error)
-   → The user MUST see a meaningful error message — not a blank screen or a JavaScript exception
-2. At least one EDGE-CASE flow: empty state, boundary value, duplicate action, already-completed action
-   → These catch the bugs that happy-path testing misses
+Return a JSON array. Each item:
+{"flowName":"verb-first name","startingRoute":"/path","flowKind":"happy-path"|"error-case"|"edge-case","steps":[{"stepDescription":"what user does","targetElementDescription":"element name","expectedOutcome":"what user sees","isNavigation":true/false}],"involvedComponents":["Name"],"testPriority":"critical"|"high"|"medium"}
 
-Flows that only test success scenarios are INCOMPLETE and will be rejected.
-
-Respond with a JSON array of user flows. Each flow:
-{
-  "flowName": "verb-first description of what the user accomplishes",
-  "startingRoute": "/path where this flow begins",
-  "flowKind": "happy-path" | "error-case" | "edge-case",
-  "steps": [
-    {
-      "stepDescription": "what the user does",
-      "targetElementDescription": "which element they interact with (human-readable, not CSS)",
-      "expectedOutcome": "what the user SEES AFTER this step completes — be specific about visible text, element state, or URL",
-      "isNavigation": true/false
-    }
-  ],
-  "involvedComponents": ["ComponentName1", "ComponentName2"],
-  "testPriority": "critical" | "high" | "medium"
-}
-
-Generate:
-- ALL critical happy-path flows (the main purpose of the app)
-- A corresponding error-case flow for EVERY happy-path flow
-- Key edge cases (empty state, validation, boundary conditions, duplicate actions)
-
-Only return a valid JSON array. No markdown, no explanation.`,
+Only return valid JSON array.`,
     },
   ];
 }
