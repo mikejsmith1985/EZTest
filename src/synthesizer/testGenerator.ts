@@ -24,6 +24,7 @@ import {
   runGeneratedTestFiles,
   type GeneratedTestSuiteResult,
 } from './generatedTestRunner.js';
+import { auditGeneratedTests } from './testQualityAuditor.js';
 
 // ── File Name Generation ───────────────────────────────────────────────────
 
@@ -87,8 +88,9 @@ async function generateTestForFlow(
   aiClient: AiClient,
   appSpec: string | undefined,
   shouldReviewAssertions: boolean,
+  feedbackContext?: string,
 ): Promise<GeneratedTestFile | null> {
-  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec);
+  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec, feedbackContext);
 
   let aiResponse;
   try {
@@ -158,11 +160,23 @@ export interface TestGeneratorOptions {
    */
   appSpec?: string;
   /**
+   * Optional project-specific learnings from eztest-feedback.json.
+   * Contains selector fix history, confirmed expectations, and false-positive
+   * flags from previous runs — injected into prompts so EZTest improves over time.
+   */
+  feedbackContext?: string;
+  /**
    * Whether to run a second AI pass to review and fix any code-level assertions
    * that slipped through the initial generation. Default: true.
    * Disable with --no-review to reduce API calls for large test suites.
    */
   shouldReviewAssertions: boolean;
+  /**
+   * Whether to run a fourth AI pass auditing all generated tests for behavioral
+   * quality (flags tests that assert on implementation details). Default: false.
+   * Opt-in because it costs an additional AI call across all generated files.
+   */
+  shouldAuditQuality?: boolean;
 }
 
 /** The result of a complete test generation run. */
@@ -186,7 +200,7 @@ export async function generateTestsForFlows(
   aiClient: AiClient,
   options: TestGeneratorOptions,
 ): Promise<TestGenerationResult> {
-  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, shouldReviewAssertions } = options;
+  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, feedbackContext, shouldReviewAssertions, shouldAuditQuality } = options;
 
   if (userFlows.length === 0) {
     logWarning('No user flows provided to test generator. Nothing to generate.');
@@ -221,6 +235,7 @@ export async function generateTestsForFlows(
       aiClient,
       appSpec,
       shouldReviewAssertions,
+      feedbackContext,
     );
 
     if (!generatedFile) {
@@ -247,6 +262,45 @@ export async function generateTestsForFlows(
     (total, file) => total + file.assertionSummary.length,
     0,
   );
+
+  // ── Quality Audit (optional fourth pass) ──────────────────────────────
+  // Opt-in via shouldAuditQuality — adds one extra AI call but catches the
+  // rare code-level assertion that slips through all three prior passes.
+  if (shouldAuditQuality && generatedFiles.length > 0) {
+    logInfo('\n── Quality Audit pass ────────────────────────────────────────────');
+    const auditableFiles = generatedFiles.map(generatedFile => ({
+      fileName: generatedFile.suggestedOutputPath.split('/').pop() ?? generatedFile.suggestedOutputPath,
+      testCode: generatedFile.testSourceCode,
+      filePath: generatedFile.suggestedOutputPath,
+    }));
+
+    try {
+      const auditResult = await auditGeneratedTests({
+        generatedTestFiles: auditableFiles,
+        appSpecContent: appSpec ?? null,
+        aiClient,
+      });
+
+      const criticalFindingCount = auditResult.flaggedTests.filter(
+        finding => finding.severity === 'critical',
+      ).length;
+      const warningFindingCount = auditResult.flaggedTests.filter(
+        finding => finding.severity === 'warning',
+      ).length;
+
+      if (criticalFindingCount > 0) {
+        logWarning(
+          `Quality audit flagged ${criticalFindingCount} critical test(s) — review the suggestions above before committing.`,
+        );
+      }
+      if (warningFindingCount > 0) {
+        logWarning(`Quality audit issued ${warningFindingCount} warning(s).`);
+      }
+    } catch (auditError) {
+      // Non-fatal: quality audit failure should never block test generation output
+      logWarning(`Quality audit step failed unexpectedly: ${String(auditError)}`);
+    }
+  }
 
   return {
     generatedFiles,

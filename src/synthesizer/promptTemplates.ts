@@ -280,6 +280,7 @@ export function buildTestCodeGenerationPrompt(
   userFlow: UserFlow,
   targetAppUrl: string,
   appSpec?: string,
+  feedbackContext?: string,
 ): AiMessage[] {
   const stepsDescription = userFlow.steps
     .map((step, stepIndex) => `Step ${stepIndex + 1}: ${step.actionDescription}
@@ -316,7 +317,7 @@ REQUIREMENTS:
 9. Apply the SO WHAT rule to every assertion: if the user wouldn't notice it, remove it
 
 Output ONLY the complete TypeScript test file content. No explanation, no markdown fences.
-The file should be ready to run with \`playwright test\`.`,
+The file should be ready to run with \`playwright test\`.${feedbackContext ? `\n\n${feedbackContext}` : ''}`,
     },
   ];
 }
@@ -590,4 +591,360 @@ Output a single TypeScript Playwright test file with all tests in one describe()
 File must be ready to run with \`playwright test\`. No explanation.`,
     },
   ];
+}
+
+// ── Spec Generation ────────────────────────────────────────────────────────
+
+/**
+ * Builds the prompt that instructs AI to generate a quality `eztest-spec.md`
+ * by analyzing the project source code, package.json, and any existing README.
+ *
+ * The generated spec is the single most important input to EZTest — it anchors
+ * every test to a real user expectation rather than an implementation detail.
+ * Written from a PRODUCT MANAGER perspective: what does the user want to
+ * accomplish, and what does success look like from their seat at the keyboard?
+ */
+export function buildSpecGenerationPrompt(
+  projectName: string,
+  packageDescription: string,
+  sourceCodeSummaries: Array<{ filePath: string; excerpt: string }>,
+  existingReadmeContent: string | null,
+): AiMessage[] {
+  const sourceCodeBlock = sourceCodeSummaries
+    .map(item => `### ${item.filePath}\n\`\`\`\n${item.excerpt}\n\`\`\``)
+    .join('\n\n');
+
+  const readmeSection = existingReadmeContent
+    ? `\n\nEXISTING README (use as context, do not just copy it):\n${existingReadmeContent}`
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a senior product manager and QA director writing behavioral acceptance criteria for an automated testing system.
+
+Your job is to analyze application source code and produce a human-readable behavioral specification that answers ONE question: "How does a real user know when this application is working correctly?"
+
+PERSPECTIVE RULES — these are absolute:
+1. Write as if you have NEVER seen the source code — only the running application
+2. Describe features in terms of what the USER sees, does, and receives — never how it works internally
+3. For every feature, define explicit success criteria: what text appears, what changes on screen, what URL changes
+4. For every feature, define failure criteria: what should the user see when something goes wrong?
+5. Use plain English — this document will be read by an AI that generates tests; be specific about visible outcomes
+
+OUTPUT FORMAT — produce a markdown document with EXACTLY this structure:
+# [App Name] — EZTest Behavioral Specification
+
+## Application Overview
+[2-3 sentences: what does this app do and who uses it?]
+
+## User Roles
+- **[Role Name]**: [what they can do / what they need]
+
+## Features & Expected Outcomes
+
+### Feature: [Feature Name]
+**User Goal:** [What is the user trying to accomplish?]
+**Happy Path:**
+1. User [action] → User sees [visible result]
+2. User [action] → User sees [visible result]
+**Success Criteria:**
+- [ ] [Specific visible outcome, e.g., "A success toast appears with the text 'Saved!'"]
+**Failure Cases:**
+- If [condition]: user sees [specific error message or UI state]
+
+## Critical User Journeys
+### Journey: [Name]
+[Step-by-step walkthrough of the most important user path through the app]
+
+## Failure Modes That Are Never Acceptable
+[Behaviors that should NEVER happen from a user perspective — blank screens, unhandled errors, silent failures]
+
+Do NOT include class names, function names, state variable names, or any technical jargon.
+Be SPECIFIC about visible text — write the actual strings a user would see, not "an error message".`,
+    },
+    {
+      role: 'user',
+      content: `Analyze this application and generate a complete eztest-spec.md.
+
+PROJECT NAME: ${projectName}
+DESCRIPTION: ${packageDescription || 'No description provided'}${readmeSection}
+
+SOURCE CODE EXCERPTS:
+${sourceCodeBlock}
+
+Generate the full eztest-spec.md now. Be thorough — every feature visible in the source code should have explicit success and failure criteria.`,
+    },
+  ];
+}
+
+// ── Test Quality Audit ─────────────────────────────────────────────────────
+
+/**
+ * Builds the prompt for the Test Quality Audit — a fourth AI pass that reads
+ * all generated tests together and flags any that test implementation details
+ * instead of user-visible behavior.
+ *
+ * Returns structured JSON so the caller can report flagged tests and optionally
+ * auto-fix them before writing to disk. This pass exists as a safety net for
+ * the (rare) cases where the first three passes still produce code-level assertions.
+ */
+export function buildTestQualityAuditPrompt(
+  generatedTestFiles: Array<{ fileName: string; testCode: string }>,
+  appSpecContent: string | null,
+): AiMessage[] {
+  const testFilesBlock = generatedTestFiles
+    .map(testFile => `### FILE: ${testFile.fileName}\n\`\`\`typescript\n${testFile.testCode}\n\`\`\``)
+    .join('\n\n');
+
+  const specSection = appSpecContent
+    ? `\n\nAPP BEHAVIORAL SPEC (what these tests should be verifying):\n${appSpecContent}`
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a ruthless QA auditor reviewing Playwright tests. Identify every test that tests CODE rather than SOFTWARE BEHAVIOR.
+
+A test tests CODE if it:
+- Calls toHaveBeenCalled(), toHaveBeenCalledWith(), or any spy/mock assertion
+- Imports or references source code from the application under test
+- Asserts on JavaScript variables, React state, Redux store, or component props
+- Uses page.waitForTimeout() — this masks real failures
+- Has a test() name describing what code runs instead of what the user experiences
+- Has zero assertions on DOM state visible to a human user
+
+A test tests BEHAVIOR if it:
+- Asserts on visible DOM elements: text, visibility, URL, form state
+- Describes the user's perspective in the test name
+- Would remain valid if the entire implementation was rewritten in a different framework
+
+Return ONLY a JSON object with this exact shape — no markdown, no explanation:
+{
+  "auditSummary": "One sentence summary of overall test quality",
+  "passRate": 0-100,
+  "flaggedTests": [
+    {
+      "fileName": "filename.spec.ts",
+      "testName": "exact test() name",
+      "issue": "specific description of what is wrong",
+      "severity": "critical" | "warning",
+      "suggestedFix": "specific replacement assertion or test name"
+    }
+  ],
+  "passingTests": ["list of test names that correctly test user behavior"]
+}`,
+    },
+    {
+      role: 'user',
+      content: `Audit these test files for behavioral quality.${specSection}
+
+TEST FILES:
+${testFilesBlock}
+
+Return the JSON audit report now. Be strict — flag any test with even ONE implementation-detail assertion.`,
+    },
+  ];
+}
+
+// ── Behavioral Interview ───────────────────────────────────────────────────
+
+/**
+ * Builds the prompt that generates targeted interview questions about the app.
+ *
+ * The "behavioral interview" captures user intent for edge cases that no static
+ * analysis can infer. By asking the developer specific questions about expected
+ * visible outcomes, we capture ground-truth expectations that AI cannot derive
+ * from source code. This is the mechanism that closes the gap from 90% to 95%.
+ */
+export function buildInterviewQuestionsPrompt(
+  projectName: string,
+  sourceCodeSummaries: Array<{ filePath: string; excerpt: string }>,
+  existingSpecContent: string | null,
+): AiMessage[] {
+  const sourceCodeBlock = sourceCodeSummaries
+    .map(item => `### ${item.filePath}\n\`\`\`\n${item.excerpt}\n\`\`\``)
+    .join('\n\n');
+
+  const specSection = existingSpecContent
+    ? `\n\nEXISTING SPEC (already answered — do NOT ask about these):\n${existingSpecContent}`
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a QA director preparing to test a web application. You need to understand exactly what users should see in specific scenarios — information that cannot be determined from source code alone.
+
+Identify the TOP 10 most important behavioral questions where the EXPECTED OUTCOME is ambiguous from static analysis.
+
+Focus on:
+- Form submissions: what exact text/message appears on success? On each validation failure?
+- Authentication: what happens after login/logout? Where does the user go?
+- Data operations: what confirmation does the user see after save/delete/update?
+- Error states: what specific message appears when a network error occurs?
+- Empty states: what does the user see when there is no data?
+- Permissions: what happens when an unauthorized user tries an action?
+
+Return ONLY a JSON array — no markdown, no explanation:
+[
+  {
+    "id": "q1",
+    "feature": "Feature area this question is about",
+    "question": "Plain English question about expected user-visible outcome",
+    "context": "Why this matters — what test assertion depends on this answer",
+    "answerType": "text" | "url" | "message" | "navigation" | "visibility"
+  }
+]
+
+Ask SPECIFIC questions — not "what happens when the form is submitted?" but "what exact text does the success message show after a user submits the contact form?"`,
+    },
+    {
+      role: 'user',
+      content: `Generate 10 behavioral interview questions for this application.
+
+PROJECT: ${projectName}${specSection}
+
+SOURCE CODE:
+${sourceCodeBlock}
+
+Return the JSON array of questions now.`,
+    },
+  ];
+}
+
+/**
+ * Builds the prompt that merges confirmed interview answers back into the spec
+ * and produces high-precision assertion templates for the test generator.
+ *
+ * Interview answers are treated as GROUND TRUTH — they override any assumption
+ * made from static analysis and become the most authoritative signal in EZTest.
+ */
+export function buildInterviewAnswerPrompt(
+  existingSpecContent: string,
+  interviewAnswers: Array<{ question: string; answer: string; feature: string }>,
+): AiMessage[] {
+  const answersBlock = interviewAnswers
+    .map((item, index) => `Q${index + 1} [${item.feature}]: ${item.question}\nConfirmed Answer: ${item.answer}`)
+    .join('\n\n');
+
+  return [
+    {
+      role: 'system',
+      content: `You are updating a behavioral test specification with confirmed user expectations provided directly by the application owner.
+
+These answers are GROUND TRUTH — they override any assumption made from static analysis.
+
+Merge the confirmed answers into the existing spec: add or update Success Criteria and Failure Cases sections with the EXACT text and behavior described. Return the complete updated spec as a markdown document. Do not remove any existing content — only ADD to it.`,
+    },
+    {
+      role: 'user',
+      content: `Update this spec with confirmed behavioral answers.
+
+EXISTING SPEC:
+${existingSpecContent}
+
+CONFIRMED BEHAVIORAL ANSWERS:
+${answersBlock}
+
+Return the complete updated eztest-spec.md now.`,
+    },
+  ];
+}
+
+
+// ── Test Plan Generation ───────────────────────────────────────────────────
+
+/**
+ * Builds the prompt that generates a human-readable test plan BEFORE writing
+ * any test code. The plan shows what will be tested in plain English so the
+ * developer can verify EZTest understands their app correctly.
+ *
+ * Complexity threshold: flows with more than 3 distinct state transitions or
+ * that span multiple pages/components are flagged as "high-complexity" and
+ * receive extra detail in the plan output.
+ */
+export function buildTestPlanPrompt(
+  projectName: string,
+  userFlows: Array<{ flowName: string; flowDescription: string; componentCount: number; hasErrorPath: boolean }>,
+  appSpecContent: string | null,
+): AiMessage[] {
+  const flowsBlock = userFlows
+    .map((flow, index) =>
+      `${index + 1}. ${flow.flowName} (${flow.componentCount} component${flow.componentCount !== 1 ? 's' : ''}, ${flow.hasErrorPath ? 'has error path' : 'happy path only'})\n   ${flow.flowDescription}`
+    )
+    .join('\n\n');
+
+  const specSection = appSpecContent
+    ? `\n\nAPP BEHAVIORAL SPEC:\n${appSpecContent}`
+    : '';
+
+  return [
+    {
+      role: 'system',
+      content: `You are a QA director producing a test plan that will be reviewed by a developer before any tests are written.
+
+The plan must be:
+- Written in plain English — no code, no technical jargon
+- Brief for straightforward flows (1-2 lines: what the user does, what they should see)
+- Detailed ONLY for high-complexity flows (those spanning multiple pages, multiple components, or with 3+ state transitions)
+- Honest about uncertainty — flag anything where the expected outcome is ambiguous
+
+COMPLEXITY THRESHOLD: A flow is "high-complexity" if it:
+- Spans more than 2 components
+- Involves authentication/permissions
+- Has more than 3 possible outcome states
+- Involves multi-step wizards or async operations
+
+OUTPUT FORMAT — return a markdown document:
+# Test Plan: [Project Name]
+## Summary
+- **Features identified:** N
+- **Test scenarios:** N total (N happy path, N edge cases, N failure cases)
+- **High-complexity flows:** N (flagged for review below)
+
+## Test Scenarios
+
+### ✅ [Feature Name] — Happy Path
+What will be tested: [1 plain-English sentence]
+Expected outcome: [what the user sees]
+
+### ⚠️ [Feature Name] — Edge Case  
+What will be tested: [1 plain-English sentence]
+Expected outcome: [what the user sees]
+_Complexity note: [why this is flagged]_
+
+### ❌ [Feature Name] — Failure Case
+What will be tested: [what goes wrong]
+Expected outcome: [the error message or fallback the user sees]
+
+## 🔍 High-Complexity Flows (Review Before Generating)
+[Only include flows that exceed the complexity threshold — full step-by-step breakdown for each]
+
+## ❓ Ambiguous Expectations (Needs Input)
+[List any flows where the expected outcome cannot be determined from source code alone — these are candidates for \`eztest interview\`]`,
+    },
+    {
+      role: 'user',
+      content: `Generate a test plan for this application.
+
+PROJECT: ${projectName}${specSection}
+
+USER FLOWS IDENTIFIED:
+${flowsBlock}
+
+Generate the complete test plan now. Be concise for simple flows — only expand detail for high-complexity ones.`,
+    },
+  ];
+}
+
+// ── Feedback Context Injection ─────────────────────────────────────────────
+
+/**
+ * Formats project-specific feedback (selector fixes, confirmed expectations,
+ * false positive flags) into a prompt section that EZTest injects into AI
+ * requests. This is the mechanism that makes EZTest improve over time.
+ */
+export function buildFeedbackContextSection(feedbackSummary: string): string {
+  if (!feedbackSummary.trim()) { return ''; }
+  return `\n\n--- PROJECT HISTORY (IMPORTANT — apply these learnings) ---\n${feedbackSummary}\n---`;
 }

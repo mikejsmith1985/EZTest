@@ -4,17 +4,25 @@
  * Registers all subcommands and handles top-level CLI concerns like
  * version display, help text, and unhandled errors.
  *
- * Usage:
- *   eztest generate  — Analyze source code and generate Playwright tests
- *   eztest record    — Start a Smart Session Recording with annotation overlay
- *   eztest replay    — Run the autonomous reproduce → fix → validate loop from a bug report
- *   eztest ui        — Launch the browser-based wizard (no terminal knowledge required)
+ * Recommended first-run workflow:
+ *   1. eztest init       — AI generates eztest-spec.md from your source code
+ *   2. eztest interview  — AI asks questions; your answers become ground-truth expectations
+ *   3. eztest plan       — Preview what tests will be written before committing
+ *   4. eztest generate   — Write the Playwright tests (with run-and-fix loop)
+ *   5. eztest feedback   — Flag false positives; EZTest learns from corrections over time
+ *   6. eztest record     — Start a Smart Session Recording with annotation overlay
+ *   7. eztest replay     — Run the autonomous reproduce → fix → validate loop from a bug report
+ *   8. eztest ui         — Launch the browser-based wizard (no terminal knowledge required)
  */
 import { Command } from 'commander';
-import { registerGenerateCommand } from './commands/generate.js';
-import { registerRecordCommand } from './commands/record.js';
-import { registerReplayCommand } from './commands/replay.js';
-import { registerUiCommand } from './commands/ui.js';
+import { registerInitCommand }      from './commands/init.js';
+import { registerGenerateCommand }  from './commands/generate.js';
+import { registerPlanCommand }      from './commands/plan.js';
+import { registerInterviewCommand } from './commands/interview.js';
+import { registerFeedbackCommand }  from './commands/feedback.js';
+import { registerRecordCommand }    from './commands/record.js';
+import { registerReplayCommand }    from './commands/replay.js';
+import { registerUiCommand }        from './commands/ui.js';
 
 const EZTEST_VERSION = '0.1.0';
 
@@ -29,8 +37,12 @@ cliProgram
   )
   .version(EZTEST_VERSION, '-V, --version', 'Output the EZTest version number');
 
-// Register subcommands
+// Register subcommands — order matches recommended first-run workflow
+registerInitCommand(cliProgram);
 registerGenerateCommand(cliProgram);
+registerPlanCommand(cliProgram);
+registerInterviewCommand(cliProgram);
+registerFeedbackCommand(cliProgram);
 registerRecordCommand(cliProgram);
 registerReplayCommand(cliProgram);
 registerUiCommand(cliProgram);

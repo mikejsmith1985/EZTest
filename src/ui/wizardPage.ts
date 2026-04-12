@@ -162,7 +162,7 @@ export function buildWizardPageHtml(): string {
     /* ── Workflow cards grid (Step 2) ── */
     .workflow-grid {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
       gap: 12px;
       margin-bottom: 20px;
     }
@@ -384,6 +384,18 @@ export function buildWizardPageHtml(): string {
         <p class="section-title">Choose a Workflow</p>
         <div class="workflow-grid">
 
+          <div class="workflow-card" id="wfInit" onclick="selectWorkflow('init')">
+            <span class="wf-emoji">📝</span>
+            <div class="wf-title">Generate Spec</div>
+            <div class="wf-desc">AI reads your source code and writes eztest-spec.md — start here</div>
+          </div>
+
+          <div class="workflow-card" id="wfPlan" onclick="selectWorkflow('plan')">
+            <span class="wf-emoji">📋</span>
+            <div class="wf-title">Preview Plan</div>
+            <div class="wf-desc">See what tests will be written before committing to full generation</div>
+          </div>
+
           <div class="workflow-card" id="wfGenerate" onclick="selectWorkflow('generate')">
             <span class="wf-emoji">🧪</span>
             <div class="wf-title">Generate Tests</div>
@@ -585,11 +597,11 @@ export function buildWizardPageHtml(): string {
 
     function selectWorkflow(workflowName) {
       selectedWorkflow = workflowName;
-      var workflowIds = ['wfGenerate', 'wfRecord', 'wfReplay'];
+      var workflowIds = ['wfInit', 'wfPlan', 'wfGenerate', 'wfRecord', 'wfReplay'];
       for (var wi = 0; wi < workflowIds.length; wi++) {
         document.getElementById(workflowIds[wi]).classList.remove('selected');
       }
-      var idMap = { generate: 'wfGenerate', record: 'wfRecord', replay: 'wfReplay' };
+      var idMap = { init: 'wfInit', plan: 'wfPlan', generate: 'wfGenerate', record: 'wfRecord', replay: 'wfReplay' };
       document.getElementById(idMap[workflowName]).classList.add('selected');
       document.getElementById('step2ConfigureBtn').disabled = false;
     }
@@ -602,7 +614,21 @@ export function buildWizardPageHtml(): string {
 
       fieldsContainer.innerHTML = '';
 
-      if (selectedWorkflow === 'generate') {
+      if (selectedWorkflow === 'init') {
+        titleEl.textContent = 'Configure: Generate Spec';
+        fieldsContainer.innerHTML =
+          buildTextField('configSource', 'Source Directory', './src', '') +
+          buildTextField('configOutput', 'Output File', './eztest-spec.md', '') +
+          buildCheckbox('configDryRun', 'Dry run — print spec without writing to disk', false);
+
+      } else if (selectedWorkflow === 'plan') {
+        titleEl.textContent = 'Configure: Preview Test Plan';
+        fieldsContainer.innerHTML =
+          buildTextField('configSource', 'Source Directory', './src', '') +
+          buildTextField('configUrl',    'Application URL',  'http://localhost:3000', '') +
+          buildTextField('configOutput', 'Save plan to file (optional)', '', './test-plan.md');
+
+      } else if (selectedWorkflow === 'generate') {
         titleEl.textContent = 'Configure: Generate Tests';
         fieldsContainer.innerHTML =
           buildTextField('configSource', 'Source Directory', './src', '') +
@@ -658,6 +684,7 @@ export function buildWizardPageHtml(): string {
       var reportEl       = document.getElementById('configReport');
       var runAndFixEl    = document.getElementById('configRunAndFix');
       var noReviewEl     = document.getElementById('configNoReview');
+      var dryRunEl       = document.getElementById('configDryRun');
 
       if (sourceEl)    { config.source    = sourceEl.value; }
       if (urlEl)       { config.url       = urlEl.value; }
@@ -665,6 +692,7 @@ export function buildWizardPageHtml(): string {
       if (reportEl)    { config.report    = reportEl.value; }
       if (runAndFixEl) { config.runAndFix = runAndFixEl.checked; }
       if (noReviewEl)  { config.noReview  = noReviewEl.checked; }
+      if (dryRunEl)    { config.dryRun    = dryRunEl.checked; }
 
       socket.emit('run:start', config);
     }

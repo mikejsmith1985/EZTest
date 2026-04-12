@@ -30,7 +30,7 @@ export interface UiServerInstance {
  * Fields are workflow-dependent — unused fields will be undefined.
  */
 interface RunConfig {
-  workflow: 'generate' | 'record' | 'replay';
+  workflow: 'init' | 'plan' | 'generate' | 'record' | 'replay';
   source?: string;
   url?: string;
   output?: string;
@@ -39,6 +39,8 @@ interface RunConfig {
   runAndFix?: boolean;
   /** Whether to skip the behavioral assertion review pass. */
   noReview?: boolean;
+  /** Whether to dry-run (print output without writing files). */
+  dryRun?: boolean;
 }
 
 /** Log severity levels understood by the wizard terminal pane. */
@@ -106,12 +108,22 @@ function detectLogLevel(outputLine: string): LogLevel {
 function buildCliArgsForWorkflow(runConfig: RunConfig): string[] {
   const cliArgs: string[] = [runConfig.workflow];
 
-  if (runConfig.workflow === 'generate') {
-    if (runConfig.source)     { cliArgs.push('--source', runConfig.source); }
-    if (runConfig.url)        { cliArgs.push('--url',    runConfig.url);    }
-    if (runConfig.output)     { cliArgs.push('--output', runConfig.output); }
-    if (runConfig.runAndFix)  { cliArgs.push('--run-and-fix'); }
-    if (runConfig.noReview)   { cliArgs.push('--no-review'); }
+  if (runConfig.workflow === 'init') {
+    if (runConfig.source)  { cliArgs.push('--source', runConfig.source); }
+    if (runConfig.output)  { cliArgs.push('--output', runConfig.output); }
+    if (runConfig.dryRun)  { cliArgs.push('--dry-run'); }
+
+  } else if (runConfig.workflow === 'plan') {
+    if (runConfig.source)  { cliArgs.push('--source', runConfig.source); }
+    if (runConfig.url)     { cliArgs.push('--url',    runConfig.url);    }
+    if (runConfig.output)  { cliArgs.push('--output', runConfig.output); }
+
+  } else if (runConfig.workflow === 'generate') {
+    if (runConfig.source)    { cliArgs.push('--source', runConfig.source); }
+    if (runConfig.url)       { cliArgs.push('--url',    runConfig.url);    }
+    if (runConfig.output)    { cliArgs.push('--output', runConfig.output); }
+    if (runConfig.runAndFix) { cliArgs.push('--run-and-fix'); }
+    if (runConfig.noReview)  { cliArgs.push('--no-review'); }
 
   } else if (runConfig.workflow === 'record') {
     if (runConfig.url)    { cliArgs.push('--url',    runConfig.url);    }

@@ -13,6 +13,7 @@
  * Usage: eztest generate --source ./src --url http://localhost:3000 --output ./tests/e2e
  */
 import type { Command } from 'commander';
+import { resolve } from 'path';
 import { loadConfig } from '../../shared/config.js';
 import { AiClient } from '../../shared/aiClient.js';
 import { logInfo, logSuccess, logError, logWarning, enableVerboseLogging } from '../../shared/logger.js';
@@ -23,6 +24,12 @@ import {
   runAndFixGeneratedTests,
 } from '../../synthesizer/testGenerator.js';
 import { detectAndReadAppSpec, readAppSpecFromFile } from '../../synthesizer/appSpecReader.js';
+import {
+  readProjectFeedback,
+  formatFeedbackForPrompt,
+  recordSelectorFix,
+} from '../../synthesizer/feedbackStore.js';
+import { buildFeedbackContextSection } from '../../synthesizer/promptTemplates.js';
 
 /** Maximum components to analyze per run — prevents runaway API costs. */
 const DEFAULT_MAX_COMPONENT_COUNT = 50;
@@ -86,6 +93,11 @@ export function registerGenerateCommand(program: Command): void {
       'Project root to run Playwright from during --run-and-fix (defaults to current directory)',
     )
     .option(
+      '--audit',
+      'Run a behavioral quality audit on all generated tests after generation (extra AI call). ' +
+      'Flags tests that assert on implementation details instead of user-visible behavior.',
+    )
+    .option(
       '--dry-run',
       'Generate tests but print to stdout instead of writing files',
     )
@@ -104,6 +116,7 @@ export function registerGenerateCommand(program: Command): void {
       review: boolean;
       runAndFix: boolean;
       workingDir?: string;
+      audit: boolean;
       dryRun: boolean;
       verbose: boolean;
     }) => {
@@ -137,6 +150,21 @@ export function registerGenerateCommand(program: Command): void {
             '  and complete checkout. The cart total must always reflect the current items."\n',
           );
         }
+      }
+
+      // ── Stage 1.5: Load project feedback (EZTest's memory for this codebase) ──
+      // Reads eztest-feedback.json from the project root — selector fix history,
+      // confirmed expectations, and false-positive flags from previous runs.
+      // This is how EZTest improves over time without any manual configuration.
+      const projectRootDirectory = resolve(commandOptions.source, '..');
+      const projectFeedback = readProjectFeedback(projectRootDirectory)
+                           ?? readProjectFeedback(process.cwd());
+      const feedbackSummary = projectFeedback ? formatFeedbackForPrompt(projectFeedback) : '';
+      const feedbackContext = buildFeedbackContextSection(feedbackSummary);
+      if (projectFeedback && feedbackSummary) {
+        const fixCount   = projectFeedback.selectorFixes.length;
+        const learnCount = projectFeedback.confirmedExpectations.length;
+        logInfo(`  Loaded project feedback: ${fixCount} selector fix${fixCount !== 1 ? 'es' : ''}, ${learnCount} confirmed expectation${learnCount !== 1 ? 's' : ''}`);
       }
 
       // ── Stage 2: Initialize AI client ──
@@ -215,7 +243,9 @@ export function registerGenerateCommand(program: Command): void {
           outputDirectory: commandOptions.output,
           shouldWriteFilesToDisk: !commandOptions.dryRun,
           appSpec: appSpec ?? undefined,
+          feedbackContext: feedbackContext || undefined,
           shouldReviewAssertions: commandOptions.review,
+          shouldAuditQuality: commandOptions.audit,
         });
       } catch (generationError) {
         logError('Test generation failed', generationError);
@@ -262,6 +292,18 @@ export function registerGenerateCommand(program: Command): void {
             if (truelyStillFailing > 0) {
               logWarning(`  ✗ Still failing:         ${truelyStillFailing} (check verbose output for details)`);
             }
+          }
+
+          // Persist selector fixes so future runs avoid the same brittle patterns
+          for (const fixedOutcome of fixResult.fileOutcomes.filter(outcome => outcome.outcome === 'fixed')) {
+            recordSelectorFix(projectRootDirectory, {
+              originalSelector: `generated selector in ${fixedOutcome.fileName}`,
+              fixedSelector:    'AI-regenerated (see file)',
+              componentHint:    fixedOutcome.fileName.replace('.spec.ts', ''),
+            });
+          }
+          if (fixResult.fixedByRegenerationCount > 0) {
+            logInfo(`  💾 ${fixResult.fixedByRegenerationCount} selector fix${fixResult.fixedByRegenerationCount !== 1 ? 'es' : ''} recorded to eztest-feedback.json`);
           }
         }
       }
