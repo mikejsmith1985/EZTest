@@ -656,6 +656,22 @@ export function buildWizardPageHtml(): string {
           <button class="action-btn" id="btn-fix">Fix &amp; Validate &#8594;</button>
         </div>
 
+        <!-- Card 4: Run Tests -->
+        <div class="action-card">
+          <div class="action-icon">&#9654;&#xFE0F;</div>
+          <div class="action-title">Run Your Tests</div>
+          <div class="action-description">
+            Execute the Playwright tests that have already been generated for your project.
+            Results stream live so you can see exactly what passed, what failed, and why —
+            then open the full HTML report in one click.
+          </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Verifying your app after a code change without re-generating tests.
+          </div>
+          <button class="action-btn" id="btn-run-tests">Run Tests &#8594;</button>
+          <div class="action-secondary-link" id="btn-open-last-report" style="display:none">Open last report</div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -1052,6 +1068,43 @@ export function buildWizardPageHtml(): string {
       );
     }
 
+    /**
+     * Runs the Playwright tests that already exist in the project's tests/ directory.
+     * This is the persistent entry point on the main page — no re-generation needed.
+     * After the run, the "Open last report" link becomes available on the same card.
+     */
+    function handleRunTestsFromCard() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+      var outputDir    = appConfig.projectPath + '/tests/';
+      var projectRoot  = appConfig.projectPath;
+      lastTestRunWorkingDir = projectRoot;
+
+      // Reveal "Open last report" link immediately so it persists even after the modal closes
+      document.getElementById('btn-open-last-report').style.display = 'block';
+
+      startRun(
+        'Running tests\u2026',
+        { workflow: 'run-tests', output: outputDir, workingDir: projectRoot },
+      );
+    }
+
+    /**
+     * Opens the most recent Playwright HTML report for the currently loaded project.
+     * Works from the main page card any time after at least one test run has completed.
+     */
+    function handleOpenLastReport() {
+      if (!lastTestRunWorkingDir && appConfig) {
+        // Fall back to the current project path if no run has happened this session
+        lastTestRunWorkingDir = appConfig.projectPath;
+      }
+      if (!lastTestRunWorkingDir) { return; }
+      fetch('/api/open-report', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ reportDir: lastTestRunWorkingDir }),
+      }).catch(function() {});
+    }
+
     // ── Config overlay ────────────────────────────────────────────────────────
 
     /** Active "run" callback stored while the config overlay is open. */
@@ -1321,10 +1374,11 @@ export function buildWizardPageHtml(): string {
           lastGenerateRunConfig = currentRunConfig;
           document.getElementById('run-tests-btn').style.display = 'inline-block';
         }
-        // After a successful test run, offer to open the HTML report
+        // After a successful test run, offer to open the HTML report (in modal and on main card)
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
           lastTestRunWorkingDir = currentRunConfig.workingDir || null;
           document.getElementById('open-report-btn').style.display = 'inline-block';
+          document.getElementById('btn-open-last-report').style.display = 'block';
         }
       } else if (data.exitCode === 130) {
         updateRunProgress(
@@ -1336,10 +1390,11 @@ export function buildWizardPageHtml(): string {
       } else {
         doneMsg.className   = 'run-result-failure';
         doneMsg.textContent = '\u274C Finished with errors (exit code ' + data.exitCode + ')';
-        // Even on failure, offer report if it was a test run (partial results exist)
+        // Even on failure, offer report — partial results are still useful
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
           lastTestRunWorkingDir = currentRunConfig.workingDir || null;
           document.getElementById('open-report-btn').style.display = 'inline-block';
+          document.getElementById('btn-open-last-report').style.display = 'block';
         }
       }
     });
@@ -1383,6 +1438,8 @@ export function buildWizardPageHtml(): string {
       document.getElementById('btn-preview-plan').addEventListener('click', handlePreviewPlan);
       document.getElementById('btn-record').addEventListener('click', handleRecord);
       document.getElementById('btn-fix').addEventListener('click', handleFixTest);
+      document.getElementById('btn-run-tests').addEventListener('click', handleRunTestsFromCard);
+      document.getElementById('btn-open-last-report').addEventListener('click', handleOpenLastReport);
 
       // Config overlay
       document.getElementById('config-cancel-btn').addEventListener('click', closeConfigOverlay);

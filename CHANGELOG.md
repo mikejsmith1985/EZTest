@@ -8,7 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Run Tests from UI** — after a successful test generation, a "▶ Run Tests" button appears in the modal done bar. Clicking it spawns `npx playwright test` in the target project's directory using Socket.io streaming so results appear live in the same terminal pane.
+- **"Run Your Tests" card on main page** — persistent 4th card in the action grid so tests can be run at any time without re-generating. Spawns `npx playwright test` in the project root, streams results live to the terminal modal.
+- **"Open last report" link on Run Tests card** — appears after any test run and stays visible after the modal closes, so the Playwright HTML report is always one click away.
+- **Run Tests from UI** — after a successful test generation, a "▶ Run Tests" button appears in the modal done bar.
 - **Open Playwright HTML Report button** — after a test run completes (pass or fail), a "📊 Open Report" button appears. Clicking it calls `POST /api/open-report` which opens `playwright-report/index.html` in the default browser via `cmd /c start`.
 - **`spawnAndStreamProcess()` helper in `uiServer.ts`** — shared streaming infrastructure used by both EZTest CLI runs and Playwright test runs, eliminating duplicate spawn/stream logic.
 - **`run-tests` workflow in `RunConfig`** — the run config union type now includes `'run-tests'` and an optional `workingDir` field so the server knows which project root to use for Playwright.
