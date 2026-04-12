@@ -157,6 +157,9 @@ const PROVIDER_KEY_ENV_VARS: Record<AiProviderName, string> = {
   openai:    'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   github:    'EZTEST_GITHUB_TOKEN',
+  // Copilot provider uses the same GitHub token — the difference is the endpoint
+  // (api.githubcopilot.com instead of models.inference.ai.azure.com) and auth flow.
+  copilot:   'EZTEST_GITHUB_TOKEN',
 };
 
 /**
@@ -211,6 +214,15 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     if (matchingApiKey) {
       environmentOverrides.apiKey = matchingApiKey;
       environmentOverrides.provider = requestedProvider;
+    }
+    // copilot provider requires no separate key — the gh CLI handles auth internally.
+    // If explicitly requested and a GitHub token exists, honour it.
+    if (requestedProvider === 'copilot') {
+      const githubToken = process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'];
+      if (githubToken) {
+        environmentOverrides.apiKey  = githubToken;
+        environmentOverrides.provider = 'copilot';
+      }
     }
     // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
     // whatever provider/key was detected from the keys that ARE present.
@@ -323,10 +335,33 @@ export const GITHUB_FREE_MODEL_ROTATION: readonly string[] = [
  */
 export function getDefaultModelForProvider(provider: AiProviderName): string {
   const modelMap: Record<AiProviderName, string> = {
-    openai: 'gpt-4o',
+    openai:    'gpt-4o',
     anthropic: 'claude-3-5-sonnet-20241022',
     // GitHub Models API — start with gpt-4.1, then rotate through GITHUB_FREE_MODEL_ROTATION
-    github: GITHUB_FREE_MODEL_ROTATION[0],
+    github:    GITHUB_FREE_MODEL_ROTATION[0],
+    // Copilot API — gpt-4.1 is 0x premium requests and has proven JSON reliability
+    copilot:   COPILOT_FREE_MODEL_ROTATION[0],
   };
   return modelMap[provider];
 }
+
+// ── GitHub Copilot API Free-Tier Rotation ──────────────────────────────────
+
+/**
+ * Ordered list of Copilot API model IDs that cost ZERO premium requests (0x multiplier).
+ * As of April 2026, only gpt-4.1 and gpt-5-mini are confirmed 0x for Copilot Pro.
+ *
+ * Ordering rationale:
+ *   - gpt-4.1 first: proven JSON reliability, best code analysis in the 0x tier
+ *   - gpt-5-mini second: newer architecture, solid fallback
+ *
+ * Excluded intentionally (all consume premium requests):
+ *   - GPT-5.4, GPT-5.3-Codex, GPT-5.2-Codex, GPT-5.2, GPT-5.1  (1x each)
+ *   - GPT-5.4 mini, Claude Haiku 4.5                              (0.33x each)
+ *   - Claude Sonnet 4.6/4.5/4                                     (1x each)
+ *   - Claude Opus 4.6/4.5                                         (3x each)
+ */
+export const COPILOT_FREE_MODEL_ROTATION: readonly string[] = [
+  'gpt-4.1',    // 0x — flagship code model, proven JSON + instruction following
+  'gpt-5-mini', // 0x — newer architecture, good fallback when gpt-4.1 is unavailable
+] as const;

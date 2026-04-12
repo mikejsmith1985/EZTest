@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **GitHub Copilot Chat API provider (`EZTEST_AI_PROVIDER=copilot`)** — new provider that calls `api.githubcopilot.com` instead of the GitHub Models API. Delivers 16 384 output tokens per call (4× the GitHub Models free-tier cap) using only 0x-premium models, eliminating most dynamic batch-splitting overhead.
+- **`src/shared/copilotAuth.ts`** — session token manager: calls `gh api /copilot_internal/v2/token`, caches the token for ~30 minutes, and auto-refreshes within a 5-minute expiry buffer. All helpers are exported for testability; the injected `tokenFetcher` parameter enables unit tests without the real `gh` CLI.
+- **`COPILOT_FREE_MODEL_ROTATION`** in `config.ts` — ordered list of 0x-premium Copilot models: `['gpt-4.1', 'gpt-5-mini']`. Only these two cost zero premium requests from the Copilot Pro monthly budget.
+- **2-model rotation for copilot provider** — `buildModelRotationList()` now branches on `provider === 'copilot'` the same way it does for `provider === 'github'`, so `gpt-4.1` exhaustion automatically falls back to `gpt-5-mini`.
+- **Copilot provider in `.env.example`** — documents `EZTEST_AI_PROVIDER=copilot` with setup instructions (`gh auth login`) and a note that no separate API key is needed.
+- **11 new unit tests in `copilotAuth.spec.ts`** — covers `parseTokenResponse` (valid, missing fields, invalid JSON), `getCopilotSessionToken` (cache hit, cache miss, near-expiry refresh, expired token refresh, error propagation), and `clearCopilotTokenCache` (forces re-fetch).
 - **"Run Your Tests" card on main page** — persistent 4th card in the action grid so tests can be run at any time without re-generating. Spawns `npx playwright test` in the project root, streams results live to the terminal modal.
 - **"Open last report" link on Run Tests card** — appears after any test run and stays visible after the modal closes, so the Playwright HTML report is always one click away.
 - **Run Tests from UI** — after a successful test generation, a "▶ Run Tests" button appears in the modal done bar.
