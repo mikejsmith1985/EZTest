@@ -225,8 +225,11 @@ export async function generateTestsForFlows(
   const generatedFiles: GeneratedTestFile[] = [];
   let failedFlowCount = 0;
 
-  for (const userFlow of userFlows) {
-    logDebug(`  Generating: ${userFlow.flowName} (${userFlow.flowKind})`);
+  for (let flowIndex = 0; flowIndex < userFlows.length; flowIndex++) {
+    const userFlow = userFlows[flowIndex];
+    // logInfo intentionally (not logDebug) — the "Writing test N/M" pattern is parsed
+    // by the UI progress bar to show per-test progress during generation.
+    logInfo(`  Writing test ${flowIndex + 1}/${userFlows.length}: ${userFlow.flowName}`);
 
     const generatedFile = await generateTestForFlow(
       userFlow,

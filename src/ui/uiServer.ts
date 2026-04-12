@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import express from 'express';
-import { Server as SocketIoServer } from 'socket.io';
+import { Server as SocketIoServer, type Socket as SocketIoSocket } from 'socket.io';
 import { buildWizardPageHtml } from './wizardPage.js';
 
 // ── App-level config types ─────────────────────────────────────────────────────
@@ -56,11 +56,17 @@ export interface UiServerInstance {
  * Fields are workflow-dependent — unused fields will be undefined.
  */
 interface RunConfig {
-  workflow: 'init' | 'plan' | 'generate' | 'record' | 'replay';
+  workflow: 'init' | 'plan' | 'generate' | 'record' | 'replay' | 'run-tests';
   source?: string;
   url?: string;
   output?: string;
   report?: string;
+  /**
+   * The working directory to run the child process in.
+   * For run-tests this is the target project root (not the EZTest install dir),
+   * so Playwright can find its config and node_modules in the right place.
+   */
+  workingDir?: string;
   /** Whether to run tests after generation and auto-fix selector failures. */
   runAndFix?: boolean;
   /** Whether to skip the behavioral assertion review pass. */
@@ -159,12 +165,102 @@ function buildCliArgsForWorkflow(runConfig: RunConfig): string[] {
     if (runConfig.report) { cliArgs.push('--report', runConfig.report); }
     if (runConfig.source) { cliArgs.push('--source', runConfig.source); }
   }
+  // 'run-tests' is handled separately in the socket handler — it spawns
+  // `npx playwright test` directly in the target project, not the EZTest CLI.
 
   return cliArgs;
 }
 
+// ── Process spawning helpers ───────────────────────────────────────────────
+
 /**
- * Updates or appends a key=value entry in the project's .env file.
+ * Spawns a child process and streams its stdout/stderr line-by-line to the
+ * connected browser socket as `run:log` events. Emits `run:done` when the
+ * process exits. Extracted so both EZTest CLI runs and `playwright test` runs
+ * share the same streaming infrastructure.
+ */
+function spawnAndStreamProcess(
+  command: string,
+  commandArgs: string[],
+  workingDirectory: string,
+  clientSocket: SocketIoSocket,
+): void {
+  // shell: true ensures npx/tsx resolve on all platforms including Windows
+  const childProcess = spawn(command, commandArgs, {
+    cwd: workingDirectory,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...process.env },
+    shell: true,
+  });
+
+  activeChildProcess = childProcess;
+
+  childProcess.stdout?.on('data', (dataChunk: Buffer) => {
+    const outputText = dataChunk.toString();
+    for (const outputLine of outputText.split('\n')) {
+      const trimmedLine = outputLine.trimEnd();
+      if (trimmedLine.length === 0) { continue; }
+      const logLevel = detectLogLevel(trimmedLine);
+      clientSocket.emit('run:log', { level: logLevel, message: trimmedLine });
+    }
+  });
+
+  childProcess.stderr?.on('data', (dataChunk: Buffer) => {
+    const outputText = dataChunk.toString();
+    for (const outputLine of outputText.split('\n')) {
+      const trimmedLine = outputLine.trimEnd();
+      if (trimmedLine.length === 0) { continue; }
+      clientSocket.emit('run:log', { level: 'error' as LogLevel, message: trimmedLine });
+    }
+  });
+
+  childProcess.on('close', (exitCode: number | null) => {
+    activeChildProcess = null;
+    clientSocket.emit('run:done', { exitCode: exitCode ?? 1 });
+  });
+
+  childProcess.on('error', (processError: Error) => {
+    clientSocket.emit('run:log', {
+      level: 'error' as LogLevel,
+      message: 'Failed to start process: ' + processError.message,
+    });
+    clientSocket.emit('run:done', { exitCode: 1 });
+    activeChildProcess = null;
+  });
+}
+
+/**
+ * Runs `npx playwright test <outputDir>` inside the target project directory.
+ * Uses `--reporter=list` for clean line-by-line streaming output and
+ * `--reporter=html` to produce the clickable HTML report when the run finishes.
+ *
+ * The working directory MUST be the target project root (not EZTest's directory)
+ * so Playwright finds its own config, base URL, and installed browsers.
+ */
+function spawnPlaywrightTestRun(
+  runConfig: RunConfig,
+  clientSocket: SocketIoSocket,
+): void {
+  const targetDirectory = runConfig.workingDir ?? process.cwd();
+  const outputDirectory = runConfig.output ?? './tests/e2e';
+
+  clientSocket.emit('run:log', {
+    level: 'info' as LogLevel,
+    message: `Running Playwright tests in: ${targetDirectory}`,
+  });
+  clientSocket.emit('run:log', {
+    level: 'info' as LogLevel,
+    message: `Test files: ${outputDirectory}`,
+  });
+
+  // list + html: list streams to the terminal, html builds the clickable report
+  const playwrightArgs = ['playwright', 'test', outputDirectory, '--reporter=list,html'];
+
+  spawnAndStreamProcess('npx', playwrightArgs, targetDirectory, clientSocket);
+}
+
+/**
+ * Writes an API key to the .env file so it persists across application restarts.
  * Also immediately applies the value to the current process environment
  * so subsequent status checks reflect the new key without a restart.
  */
@@ -483,6 +579,36 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     });
   });
 
+  // ── POST /api/open-report — opens the Playwright HTML report in the browser ──
+  // Uses the Windows `start` command to open the file with the default browser.
+  // The reportDir is the project root where Playwright wrote playwright-report/.
+  expressApp.post('/api/open-report', (req, res) => {
+    const { reportDir } = req.body as { reportDir?: string };
+    if (!reportDir) {
+      res.status(400).json({ opened: false, error: 'reportDir is required' });
+      return;
+    }
+
+    // Playwright always writes its HTML report to playwright-report/index.html
+    // relative to the cwd used when the tests ran.
+    const reportIndexPath = join(reportDir, 'playwright-report', 'index.html');
+
+    if (!existsSync(reportIndexPath)) {
+      res.status(404).json({ opened: false, error: 'Report not found at: ' + reportIndexPath });
+      return;
+    }
+
+    // `start "" "path"` opens the file with the system default browser on Windows.
+    // The empty first argument is required so Windows doesn't treat the path as the window title.
+    spawn('cmd', ['/c', 'start', '""', reportIndexPath], {
+      shell: false,
+      detached: true,
+      stdio: 'ignore',
+    }).unref(); // unref() so Node doesn't wait for the browser process to exit
+
+    res.json({ opened: true, reportPath: reportIndexPath });
+  });
+
   // ── Socket.io — real-time run streaming ───────────────────────────────────
   socketServer.on('connection', (clientSocket) => {
 
@@ -492,6 +618,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       if (activeChildProcess) {
         activeChildProcess.kill();
         activeChildProcess = null;
+      }
+
+      // run-tests spawns `npx playwright test` directly in the target project —
+      // it does NOT go through the EZTest CLI because Playwright must run with
+      // the target project's cwd so it can find its config and node_modules.
+      if (runConfig.workflow === 'run-tests') {
+        spawnPlaywrightTestRun(runConfig, clientSocket);
+        return;
       }
 
       const cliArgs = buildCliArgsForWorkflow(runConfig);
@@ -504,51 +638,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
         ? [cliEntryPath, ...cliArgs]
         : [join(process.cwd(), 'src', 'cli', 'index.ts'), ...cliArgs];
 
-      // shell: true ensures npx/tsx resolve on all platforms including Windows
-      const childProcess = spawn(command, commandArgs, {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        env: { ...process.env },
-        shell: true,
-      });
-
-      activeChildProcess = childProcess;
-
-      // Stream stdout lines to the browser terminal pane
-      childProcess.stdout?.on('data', (dataChunk: Buffer) => {
-        const outputText = dataChunk.toString();
-        // Split on newlines so each line gets its own colored entry
-        for (const outputLine of outputText.split('\n')) {
-          const trimmedLine = outputLine.trimEnd();
-          if (trimmedLine.length === 0) { continue; }
-          const logLevel = detectLogLevel(trimmedLine);
-          clientSocket.emit('run:log', { level: logLevel, message: trimmedLine });
-        }
-      });
-
-      // Stream stderr as error-level lines
-      childProcess.stderr?.on('data', (dataChunk: Buffer) => {
-        const outputText = dataChunk.toString();
-        for (const outputLine of outputText.split('\n')) {
-          const trimmedLine = outputLine.trimEnd();
-          if (trimmedLine.length === 0) { continue; }
-          clientSocket.emit('run:log', { level: 'error' as LogLevel, message: trimmedLine });
-        }
-      });
-
-      childProcess.on('close', (exitCode: number | null) => {
-        activeChildProcess = null;
-        clientSocket.emit('run:done', { exitCode: exitCode ?? 1 });
-      });
-
-      childProcess.on('error', (processError: Error) => {
-        clientSocket.emit('run:log', {
-          level: 'error' as LogLevel,
-          message: 'Failed to start process: ' + processError.message,
-        });
-        clientSocket.emit('run:done', { exitCode: 1 });
-        activeChildProcess = null;
-      });
+      spawnAndStreamProcess(command, commandArgs, process.cwd(), clientSocket);
     });
 
     // Client requests cancellation of the active process

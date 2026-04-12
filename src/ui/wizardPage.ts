@@ -437,6 +437,32 @@ export function buildWizardPageHtml(): string {
       cursor: pointer;
     }
     .run-modal-cancel-btn:hover { border-color: ${COLOR_ERROR}; color: ${COLOR_ERROR}; }
+    /* ── Progress bar (shown between header and terminal during active runs) ── */
+    .run-progress-section {
+      padding: 12px 20px 10px;
+      border-bottom: 1px solid ${COLOR_BORDER};
+      flex-shrink: 0;
+    }
+    .run-progress-bar-track {
+      height: 4px;
+      background: ${COLOR_BORDER};
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .run-progress-bar-fill {
+      height: 100%;
+      background: ${COLOR_ACCENT};
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.5s ease;
+    }
+    .run-progress-bar-fill.is-done { background: ${COLOR_SUCCESS}; }
+    .run-progress-label {
+      font-size: 0.75rem;
+      color: ${COLOR_MUTED};
+      letter-spacing: 0.01em;
+    }
     .run-terminal {
       flex: 1;
       overflow-y: auto;
@@ -464,6 +490,26 @@ export function buildWizardPageHtml(): string {
     .run-result-success { color: ${COLOR_SUCCESS}; font-weight: 600; font-size: 0.9rem; }
     .run-result-failure { color: ${COLOR_ERROR};   font-weight: 600; font-size: 0.9rem; }
     .run-result-warning { color: ${COLOR_WARNING}; font-weight: 600; font-size: 0.9rem; }
+    /* Action buttons shown in the done bar after a run completes */
+    .run-action-btn {
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .run-action-btn:hover { opacity: 0.88; }
+    .run-action-btn.is-secondary {
+      background: transparent;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_MUTED};
+    }
+    .run-action-btn.is-secondary:hover { border-color: ${COLOR_ACCENT}; color: ${COLOR_ACCENT}; }
+    .run-done-actions { display: flex; gap: 8px; align-items: center; }
     .spinner {
       width: 18px; height: 18px;
       border: 2px solid ${COLOR_BORDER};
@@ -644,10 +690,23 @@ export function buildWizardPageHtml(): string {
         </span>
         <button class="run-modal-cancel-btn" id="run-cancel-btn">Cancel</button>
       </div>
+      <!-- Progress bar: driven by log message parsing — no separate protocol needed -->
+      <div class="run-progress-section" id="run-progress-section" style="display:none">
+        <div class="run-progress-bar-track">
+          <div class="run-progress-bar-fill" id="run-progress-bar"></div>
+        </div>
+        <div class="run-progress-label" id="run-progress-label">Starting…</div>
+      </div>
       <div class="run-terminal" id="run-terminal"></div>
       <div class="run-done-bar" id="run-done-bar" style="display:none">
         <span id="run-done-msg"></span>
-        <button class="btn-ghost" onclick="closeRunModal()">Close</button>
+        <div class="run-done-actions">
+          <!-- Shown after a successful generate run -->
+          <button class="run-action-btn" id="run-tests-btn"   style="display:none" onclick="startRunTests()">&#9654; Run Tests</button>
+          <!-- Shown after a successful test run -->
+          <button class="run-action-btn is-secondary" id="open-report-btn" style="display:none" onclick="openPlaywrightReport()">&#128202; Open Report</button>
+          <button class="btn-ghost" onclick="closeRunModal()">Close</button>
+        </div>
       </div>
     </div>
   </div>
@@ -662,6 +721,27 @@ export function buildWizardPageHtml(): string {
     var scanResult  = null;   // scanned project info
     var isRunning   = false;
     var socket      = io();
+    /** Interval handle for the rate-limit retry countdown — cleared on resume or cancel. */
+    var progressRetryCountdown = null;
+    /** Total test files to generate, extracted from "Generating Playwright tests for N" log line. */
+    var progressTotalTests = 0;
+    /** Running count of confirmed-written test files, incremented on each "Written:" log line. */
+    var progressTestsWritten = 0;
+    /**
+     * The last successfully completed generate run config.
+     * Retained so the "Run Tests" button knows which output dir and project root to use.
+     */
+    var lastGenerateRunConfig = null;
+    /**
+     * The project root used for the most recent test run.
+     * Passed to /api/open-report so it can locate playwright-report/index.html.
+     */
+    var lastTestRunWorkingDir = null;
+    /**
+     * The run config for the currently active (or most recently started) run.
+     * Used in run:done to decide which action buttons to show.
+     */
+    var currentRunConfig = null;
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -1005,11 +1085,29 @@ export function buildWizardPageHtml(): string {
       if (isRunning) { return; }
       isRunning = true;
 
+      // Reset progress bar to initial state for every new run
+      var progressBar = document.getElementById('run-progress-bar');
+      progressBar.style.width = '2%';
+      progressBar.classList.remove('is-done');
+      document.getElementById('run-progress-label').textContent  = 'Starting…';
+      document.getElementById('run-progress-section').style.display = 'block';
+      progressTotalTests   = 0;
+      progressTestsWritten = 0;
+      if (progressRetryCountdown) {
+        clearInterval(progressRetryCountdown);
+        progressRetryCountdown = null;
+      }
+
       document.getElementById('run-modal-title').innerHTML = '<span class="spinner"></span>' + escapeHtml(titleText);
       document.getElementById('run-terminal').innerHTML    = '';
-      document.getElementById('run-done-bar').style.display = 'none';
+      document.getElementById('run-done-bar').style.display  = 'none';
+      document.getElementById('run-tests-btn').style.display  = 'none';
+      document.getElementById('open-report-btn').style.display = 'none';
       document.getElementById('run-cancel-btn').style.display = 'block';
       document.getElementById('run-modal').style.display     = 'flex';
+
+      // Track the current run so run:done knows which action buttons to reveal
+      currentRunConfig = runConfig;
 
       socket.emit('run:start', runConfig);
     }
@@ -1023,21 +1121,190 @@ export function buildWizardPageHtml(): string {
       terminal.scrollTop = terminal.scrollHeight;
     }
 
+    /**
+     * Sets the progress bar fill width and the stage label beneath it.
+     * percentComplete is 0–100; stageLabelText is a human-readable description
+     * of what the pipeline is currently doing.
+     */
+    function updateRunProgress(percentComplete, stageLabelText) {
+      var barFill = document.getElementById('run-progress-bar');
+      var label   = document.getElementById('run-progress-label');
+      barFill.style.width   = Math.min(100, percentComplete) + '%';
+      label.textContent     = stageLabelText;
+      if (percentComplete >= 100) {
+        barFill.classList.add('is-done');
+      } else {
+        barFill.classList.remove('is-done');
+      }
+    }
+
+    /**
+     * Shows a live countdown in the progress label when a rate-limit retry
+     * is in progress. Ticks every second so the user knows the run is alive
+     * and exactly how long until it resumes — not just frozen.
+     */
+    function startRetryCountdown(waitSeconds, stageLabel) {
+      if (progressRetryCountdown) { clearInterval(progressRetryCountdown); }
+      var secondsRemaining = waitSeconds;
+      var currentPercent   = parseFloat(document.getElementById('run-progress-bar').style.width) || 0;
+
+      function tickCountdown() {
+        if (secondsRemaining <= 0) {
+          clearInterval(progressRetryCountdown);
+          progressRetryCountdown = null;
+          updateRunProgress(currentPercent, stageLabel);
+          return;
+        }
+        updateRunProgress(
+          currentPercent,
+          stageLabel + ' — rate limited, resuming in ' + secondsRemaining + 's…',
+        );
+        secondsRemaining--;
+      }
+      tickCountdown(); // fire immediately so first second shows right away
+      progressRetryCountdown = setInterval(tickCountdown, 1000);
+    }
+
+    /**
+     * Parses a single log line from the CLI process and advances the progress bar
+     * when the line matches a known pipeline stage or batch/test count marker.
+     *
+     * All progress signals come from text already streamed to the terminal — no
+     * separate protocol or socket event is needed. Patterns must stay in sync with
+     * the log messages emitted by generate.ts, flowMapper.ts, and testGenerator.ts.
+     */
+    function parseProgressFromLog(logMessage) {
+      // Stage: source code analysis begins
+      if (logMessage.includes('Analyzing source code')) {
+        updateRunProgress(10, 'Analyzing source code…');
+        return;
+      }
+
+      // Stage: component scan complete — show the count
+      var componentsMatch = logMessage.match(/Found (\d+) component/);
+      if (componentsMatch) {
+        updateRunProgress(22, 'Found ' + componentsMatch[1] + ' components — building flow map…');
+        return;
+      }
+
+      // Stage: flow mapping begins
+      if (logMessage.includes('Mapping components to user flows')) {
+        updateRunProgress(25, 'Mapping components to user flows…');
+        return;
+      }
+
+      // Flow-mapping batch progress — "batch N/M" appears in both normal and error log lines.
+      // Maps batch N of M to the 25%–60% range.
+      var batchMatch = logMessage.match(/batch\s+(\d+)\/(\d+)/i);
+      if (batchMatch) {
+        var batchCurrent = parseInt(batchMatch[1], 10);
+        var batchTotal   = parseInt(batchMatch[2], 10);
+        var batchPercent = 25 + Math.floor((batchCurrent / batchTotal) * 35);
+        updateRunProgress(batchPercent, 'Mapping flows — batch ' + batchCurrent + ' of ' + batchTotal + '…');
+        return;
+      }
+
+      // Stage: all flows identified
+      var flowsMatch = logMessage.match(/Identified (\d+) user flow/);
+      if (flowsMatch) {
+        updateRunProgress(60, 'Identified ' + flowsMatch[1] + ' user flows — generating tests…');
+        return;
+      }
+
+      // Stage: test generation begins
+      if (logMessage.includes('Generating Playwright tests for')) {
+        updateRunProgress(63, 'Generating Playwright test files…');
+        return;
+      }
+
+      // Per-test progress — "Writing test N/M: flow name" emitted by testGenerator.ts.
+      // Maps test N of M to the 63%–95% range.
+      var testMatch = logMessage.match(/Writing test\s+(\d+)\/(\d+)/);
+      if (testMatch) {
+        var testCurrent = parseInt(testMatch[1], 10);
+        var testTotal   = parseInt(testMatch[2], 10);
+        var testPercent = 63 + Math.floor((testCurrent / testTotal) * 32);
+        updateRunProgress(testPercent, 'Writing tests — ' + testCurrent + ' of ' + testTotal + '…');
+        return;
+      }
+
+      // Rate-limit retry — start a live countdown so the user knows it's not frozen.
+      // The "Retrying in Xs" text is emitted by aiClient.ts's executeWithRetry().
+      var retryMatch = logMessage.match(/Retrying in (\d+)s/);
+      if (retryMatch) {
+        var waitSeconds  = parseInt(retryMatch[1], 10);
+        var currentLabel = document.getElementById('run-progress-label').textContent
+                             .replace(/ — rate limited.*/, ''); // strip any prior countdown
+        startRetryCountdown(waitSeconds, currentLabel);
+        return;
+      }
+
+      // Stage: pipeline finished
+      if (logMessage.includes('Done!')) {
+        if (progressRetryCountdown) {
+          clearInterval(progressRetryCountdown);
+          progressRetryCountdown = null;
+        }
+        updateRunProgress(100, '✅ Done!');
+      }
+    }
+
     function closeRunModal() {
       document.getElementById('run-modal').style.display = 'none';
       isRunning = false;
+    }
+
+    /**
+     * Starts a Playwright test run against the output directory from the last
+     * successful generate run. Uses the project root as the working directory
+     * so Playwright finds its own config and installed browsers.
+     */
+    function startRunTests() {
+      if (!lastGenerateRunConfig) { return; }
+      var projectRoot = appConfig ? appConfig.projectPath : null;
+      lastTestRunWorkingDir = projectRoot;
+
+      startRun(
+        'Running tests\u2026',
+        {
+          workflow:    'run-tests',
+          output:      lastGenerateRunConfig.output,
+          workingDir:  projectRoot || undefined,
+        },
+      );
+    }
+
+    /**
+     * Sends the last test run's working directory to the server so it can open
+     * the Playwright HTML report (playwright-report/index.html) in the default browser.
+     */
+    function openPlaywrightReport() {
+      if (!lastTestRunWorkingDir) { return; }
+      fetch('/api/open-report', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ reportDir: lastTestRunWorkingDir }),
+      }).catch(function() {
+        // Non-fatal — the button is best-effort; user can open the file manually
+      });
     }
 
     // ── Socket events ─────────────────────────────────────────────────────────
 
     socket.on('run:log', function(data) {
       appendLogLine(data.level, data.message);
+      parseProgressFromLog(data.message);
     });
 
     socket.on('run:done', function(data) {
       isRunning = false;
-      var doneBar  = document.getElementById('run-done-bar');
-      var doneMsg  = document.getElementById('run-done-msg');
+      // Always stop the retry countdown — the run is finished regardless of outcome
+      if (progressRetryCountdown) {
+        clearInterval(progressRetryCountdown);
+        progressRetryCountdown = null;
+      }
+      var doneBar   = document.getElementById('run-done-bar');
+      var doneMsg   = document.getElementById('run-done-msg');
       var cancelBtn = document.getElementById('run-cancel-btn');
 
       doneBar.style.display        = 'flex';
@@ -1045,14 +1312,35 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-modal-title').textContent = 'Run complete';
 
       if (data.exitCode === 0) {
+        updateRunProgress(100, '\u2705 All done!');
         doneMsg.className   = 'run-result-success';
         doneMsg.textContent = '\u2705 Completed successfully';
+
+        // After a successful generate, offer to run the tests immediately
+        if (currentRunConfig && currentRunConfig.workflow === 'generate') {
+          lastGenerateRunConfig = currentRunConfig;
+          document.getElementById('run-tests-btn').style.display = 'inline-block';
+        }
+        // After a successful test run, offer to open the HTML report
+        if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
+          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          document.getElementById('open-report-btn').style.display = 'inline-block';
+        }
       } else if (data.exitCode === 130) {
+        updateRunProgress(
+          parseFloat(document.getElementById('run-progress-bar').style.width) || 0,
+          'Cancelled',
+        );
         doneMsg.className   = 'run-result-warning';
         doneMsg.textContent = 'Cancelled';
       } else {
         doneMsg.className   = 'run-result-failure';
         doneMsg.textContent = '\u274C Finished with errors (exit code ' + data.exitCode + ')';
+        // Even on failure, offer report if it was a test run (partial results exist)
+        if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
+          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          document.getElementById('open-report-btn').style.display = 'inline-block';
+        }
       }
     });
 
