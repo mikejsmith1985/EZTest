@@ -9,6 +9,8 @@
  * All dynamic JS values must use string concatenation instead.
  */
 
+import { resolve } from 'node:path';
+
 // ── Color palette ────────────────────────────────────────────────────────────
 
 const COLOR_BG       = '#0d1117';
@@ -22,10 +24,58 @@ const COLOR_PRIMARY  = '#e6edf3';
 const COLOR_MUTED    = '#8b949e';
 
 /**
+ * Builds copy-ready MCP setup presets that already include the local Node.js
+ * executable and the compiled EZTest MCP entry point for this machine.
+ */
+function buildMcpSetupPresets(): Record<string, {
+  title: string;
+  destination: string;
+  searchHint: string;
+  snippet: string;
+}> {
+  const nodeExecutablePath = process.execPath;
+  const mcpEntryPointPath = resolve(process.cwd(), 'dist', 'mcp', 'index.js');
+
+  const stdioCommand = {
+    command: nodeExecutablePath,
+    args:    [mcpEntryPointPath],
+  };
+
+  return {
+    vscode: {
+      title:       'VS Code',
+      destination: '.vscode/mcp.json',
+      searchHint:  'Open your project in VS Code, then paste this into .vscode/mcp.json.',
+      snippet:     JSON.stringify({ servers: { eztest: { type: 'stdio', ...stdioCommand } } }, null, 2),
+    },
+    cursor: {
+      title:       'Cursor',
+      destination: '~/.cursor/mcp.json',
+      searchHint:  'Paste this into your Cursor MCP config file, then save.',
+      snippet:     JSON.stringify({ mcpServers: { eztest: stdioCommand } }, null, 2),
+    },
+    windsurf: {
+      title:       'Windsurf',
+      destination: '~/.windsurf/mcp.json',
+      searchHint:  'Paste this into your Windsurf MCP config file, then save.',
+      snippet:     JSON.stringify({ mcpServers: { eztest: stdioCommand } }, null, 2),
+    },
+    claude: {
+      title:       'Claude Code',
+      destination: 'Claude Code terminal',
+      searchHint:  'Paste this command into Claude Code once, then press Enter.',
+      snippet:     'claude mcp add eztest -- "' + nodeExecutablePath + '" "' + mcpEntryPointPath + '"',
+    },
+  };
+}
+
+/**
  * Returns the full HTML document for the EZTest application as a string.
  * The page is entirely self-contained — all CSS and JavaScript are inlined.
  */
 export function buildWizardPageHtml(): string {
+  const mcpSetupPresetsJson = JSON.stringify(buildMcpSetupPresets());
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -366,6 +416,7 @@ export function buildWizardPageHtml(): string {
       max-width: 460px;
       width: 100%;
     }
+    .config-card.is-wide { max-width: 760px; }
     .config-card-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 6px; }
     .config-card-desc { font-size: 0.87rem; color: ${COLOR_MUTED}; line-height: 1.55; margin-bottom: 22px; }
     .config-input-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -396,6 +447,97 @@ export function buildWizardPageHtml(): string {
     .config-btn-row { display: flex; gap: 10px; margin-top: 20px; }
     .config-btn-row .btn-primary { flex: 1; }
     .config-btn-row .btn-ghost { width: auto; }
+    .mcp-step-list {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .mcp-step-card {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .mcp-step-number {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .mcp-step-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 3px; }
+    .mcp-step-body { font-size: 0.82rem; color: ${COLOR_MUTED}; line-height: 1.5; }
+    .mcp-preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .mcp-preset-btn {
+      background: #21262d;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_PRIMARY};
+      border-radius: 999px;
+      padding: 9px 14px;
+      font-size: 0.84rem;
+      cursor: pointer;
+    }
+    .mcp-preset-btn.is-active {
+      background: ${COLOR_ACCENT}22;
+      border-color: ${COLOR_ACCENT};
+      color: #fff;
+    }
+    .mcp-destination-box {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px;
+      color: ${COLOR_PRIMARY};
+      padding: 10px 12px;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    .mcp-search-hint {
+      margin-top: 6px;
+      font-size: 0.78rem;
+      color: ${COLOR_MUTED};
+      line-height: 1.5;
+    }
+    .mcp-snippet-box {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px;
+      color: ${COLOR_PRIMARY};
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .mcp-copy-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .mcp-copy-row .btn-primary { width: auto; padding: 10px 18px; }
+    .mcp-copy-status {
+      font-size: 0.8rem;
+      color: ${COLOR_MUTED};
+      line-height: 1.5;
+    }
 
     /* ── Run output modal ── */
     .run-modal {
@@ -672,6 +814,20 @@ export function buildWizardPageHtml(): string {
           <div class="action-secondary-link" id="btn-open-last-report" style="display:none">Open last report</div>
         </div>
 
+        <!-- Card 5: MCP Setup -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F9E9;</div>
+          <div class="action-title">Set Up EZTest In My IDE</div>
+          <div class="action-description">
+            Want EZTest inside VS Code, Cursor, Windsurf, or Claude Code?
+            We give you the exact setup to copy for this computer — already filled in.
+          </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Using EZTest from your IDE without touching the terminal.
+          </div>
+          <button class="action-btn" id="btn-mcp-setup">Open MCP Setup &#8594;</button>
+        </div>
+
       </div>
     </div>
   </div>
@@ -758,6 +914,10 @@ export function buildWizardPageHtml(): string {
      * Used in run:done to decide which action buttons to show.
      */
     var currentRunConfig = null;
+    /** Copy-ready MCP setup presets for supported IDEs. */
+    var mcpSetupPresets = ${mcpSetupPresetsJson};
+    /** The preset currently selected in the MCP setup helper. */
+    var activeMcpPresetKey = 'vscode';
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -1098,6 +1258,82 @@ export function buildWizardPageHtml(): string {
     }
 
     /**
+     * Opens a kid-simple MCP setup helper: pick an IDE, copy the ready-made
+     * snippet, paste it where the helper tells you, save, and you're done.
+     */
+    function handleMcpSetup() {
+      openConfigOverlay(
+        'Set Up EZTest In My IDE',
+        'Three easy steps: pick your IDE, click Copy setup, then paste it where EZTest tells you. No command line knowledge required.',
+        renderMcpSetupFields,
+        function() { return true; },
+        { runButtonLabel: 'Done', isWide: true },
+      );
+    }
+
+    /** Builds the MCP helper content inside the shared overlay. */
+    function renderMcpSetupFields(container) {
+      container.innerHTML =
+        '<div class="mcp-step-list">'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">1</div><div><div class="mcp-step-title">Pick your IDE</div><div class="mcp-step-body">Choose the app you use below.</div></div></div>'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">2</div><div><div class="mcp-step-title">Copy the setup</div><div class="mcp-step-body">EZTest already filled in the right Node and EZTest paths for this computer.</div></div></div>'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">3</div><div><div class="mcp-step-title">Paste and save</div><div class="mcp-step-body">Put it in the file shown below, or run the command if you picked Claude Code.</div></div></div>'
+        + '</div>'
+        + '<div class="mcp-preset-row">'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-vscode" onclick="renderSelectedMcpPreset(\'vscode\')">VS Code</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-cursor" onclick="renderSelectedMcpPreset(\'cursor\')">Cursor</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-windsurf" onclick="renderSelectedMcpPreset(\'windsurf\')">Windsurf</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-claude" onclick="renderSelectedMcpPreset(\'claude\')">Claude Code</button>'
+        + '</div>'
+        + '<div class="config-input-row">'
+        + '<label>Paste this into</label>'
+        + '<div class="mcp-destination-box" id="mcp-destination-box"></div>'
+        + '<div class="mcp-search-hint" id="mcp-search-hint"></div>'
+        + '</div>'
+        + '<div class="config-input-row">'
+        + '<label>Copy this setup</label>'
+        + '<pre class="mcp-snippet-box" id="mcp-snippet-box"></pre>'
+        + '</div>'
+        + '<div class="mcp-copy-row">'
+        + '<button type="button" class="btn-primary" onclick="copySelectedMcpPreset()">Copy setup</button>'
+        + '<div class="mcp-copy-status" id="mcp-copy-status">Tip: after you paste it, save the file and restart your IDE if it asks.</div>'
+        + '</div>';
+
+      renderSelectedMcpPreset(activeMcpPresetKey);
+    }
+
+    /** Switches the visible MCP snippet to match the selected IDE. */
+    function renderSelectedMcpPreset(presetKey) {
+      var selectedPreset = mcpSetupPresets[presetKey];
+      if (!selectedPreset) { return; }
+
+      activeMcpPresetKey = presetKey;
+      document.getElementById('mcp-destination-box').textContent = selectedPreset.destination;
+      document.getElementById('mcp-search-hint').textContent = selectedPreset.searchHint;
+      document.getElementById('mcp-snippet-box').textContent = selectedPreset.snippet;
+      document.getElementById('mcp-copy-status').textContent = 'Click Copy setup, then paste this into ' + selectedPreset.destination + '.';
+
+      Object.keys(mcpSetupPresets).forEach(function(availablePresetKey) {
+        var presetButton = document.getElementById('mcp-preset-' + availablePresetKey);
+        if (presetButton) {
+          presetButton.classList.toggle('is-active', availablePresetKey === presetKey);
+        }
+      });
+    }
+
+    /** Copies the selected MCP setup snippet to the clipboard and confirms success. */
+    function copySelectedMcpPreset() {
+      var selectedPreset = mcpSetupPresets[activeMcpPresetKey];
+      if (!selectedPreset) { return; }
+
+      navigator.clipboard.writeText(selectedPreset.snippet).then(function() {
+        document.getElementById('mcp-copy-status').textContent = 'Copied! Now paste it into ' + selectedPreset.destination + '.';
+      }).catch(function() {
+        document.getElementById('mcp-copy-status').textContent = 'Copy failed. You can still select the text and copy it by hand.';
+      });
+    }
+
+    /**
      * Opens the most recent Playwright HTML report for the currently loaded project.
      * Works from the main page card any time after at least one test run has completed.
      */
@@ -1124,9 +1360,16 @@ export function buildWizardPageHtml(): string {
      * and field-builder function. The onRun callback is called when the
      * user clicks "Run" and should return false to cancel (e.g. validation fail).
      */
-    function openConfigOverlay(title, description, buildFields, onRun) {
+    function openConfigOverlay(title, description, buildFields, onRun, overlayOptions) {
+      var normalizedOverlayOptions = overlayOptions || {};
+      var configCardElement = document.querySelector('#config-overlay .config-card');
       document.getElementById('config-overlay-title').textContent = title;
       document.getElementById('config-overlay-desc').textContent  = description;
+      document.getElementById('config-run-btn').textContent = normalizedOverlayOptions.runButtonLabel || 'Run →';
+      document.getElementById('config-cancel-btn').textContent = normalizedOverlayOptions.cancelButtonLabel || 'Cancel';
+      if (configCardElement) {
+        configCardElement.classList.toggle('is-wide', Boolean(normalizedOverlayOptions.isWide));
+      }
       buildFields(document.getElementById('config-overlay-fields'));
       activeConfigRunFn = onRun;
       document.getElementById('config-overlay').style.display = 'flex';
@@ -1451,6 +1694,7 @@ export function buildWizardPageHtml(): string {
       document.getElementById('btn-record').addEventListener('click', handleRecord);
       document.getElementById('btn-fix').addEventListener('click', handleFixTest);
       document.getElementById('btn-run-tests').addEventListener('click', handleRunTestsFromCard);
+      document.getElementById('btn-mcp-setup').addEventListener('click', handleMcpSetup);
       document.getElementById('btn-open-last-report').addEventListener('click', handleOpenLastReport);
 
       // Config overlay

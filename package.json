@@ -1,6 +1,6 @@
 {
   "name": "eztest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI-powered behavioral testing companion — reads your code, understands user intent, generates real Playwright tests",
   "main": "dist/cli/index.js",
   "bin": {

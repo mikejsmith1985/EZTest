@@ -86,9 +86,10 @@ test.describe('uiServer', () => {
 
     const scriptContent = scriptMatch![1];
 
-    // Confirm all 4 action cards are present — a blank page means cards are missing
+    // Confirm all 5 action cards are present — a blank page means cards are missing
     const cardMatches = htmlBody.match(/class="action-card"/g) ?? [];
-    expect(cardMatches).toHaveLength(4);
+    expect(cardMatches).toHaveLength(5);
+    expect(htmlBody).toContain('Set Up EZTest In My IDE');
 
     // The most common template-literal escape bug: \d and \s lose their backslash,
     // turning /(\d+)/ into /(d+)/ in the output. Verify the raw regex chars are correct.

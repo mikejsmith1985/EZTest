@@ -150,6 +150,8 @@ Create `eztest.config.json` in your project root (all fields optional):
 
 EZTest exposes all three engines as [Model Context Protocol](https://modelcontextprotocol.io) tools. Any MCP-capable IDE can call them directly, letting the IDE's AI agent orchestrate your testing workflow conversationally.
 
+If you launched EZTest in the browser UI, click **Set Up EZTest In My IDE** on the home screen. EZTest will show a copy-ready setup snippet for VS Code, Cursor, Windsurf, or Claude Code with the correct local paths already filled in.
+
 ### Available Tools
 
 | Tool | What it does |
