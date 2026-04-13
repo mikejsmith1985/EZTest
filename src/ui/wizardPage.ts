@@ -965,7 +965,8 @@ export function buildWizardPageHtml(): string {
       // appending the sub-directory — mixed slashes confuse Playwright's file glob.
       var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
       var outputDir = normalizedProjectPath + '/tests/';
-      startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir });
+      // Pass appUrl so the AI generates tests against the real app URL, not localhost.
+      startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir, url: appConfig.appUrl });
     }
 
     /**
@@ -1092,7 +1093,7 @@ export function buildWizardPageHtml(): string {
 
       startRun(
         'Running tests\u2026',
-        { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot },
+        { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot, appUrl: appConfig.appUrl },
       );
     }
 
