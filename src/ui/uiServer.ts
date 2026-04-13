@@ -4,8 +4,8 @@
  * that lets users run EZTest workflows without touching the terminal.
  */
 import { createServer } from 'node:http';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import express from 'express';
@@ -230,19 +230,77 @@ function spawnAndStreamProcess(
 }
 
 /**
- * Runs `npx playwright test <outputDir>` inside the target project directory.
- * Uses `--reporter=list` for clean line-by-line streaming output and
- * `--reporter=html` to produce the clickable HTML report when the run finishes.
+ * The filename for the minimal Playwright config EZTest writes alongside
+ * generated test files. Using a distinct name avoids overwriting the user's
+ * own playwright.config.ts and makes it clear which config drives EZTest runs.
+ */
+const EZTEST_PLAYWRIGHT_CONFIG_FILENAME = 'eztest.playwright.config.js';
+
+/**
+ * Writes a minimal Playwright configuration file into the given directory.
+ * The config sets testDir to '.' (i.e., the directory that contains it),
+ * so Playwright discovers all .spec.ts files in that folder regardless of
+ * what testDir the host project's own config uses.
  *
- * The working directory MUST be the target project root (not EZTest's directory)
- * so Playwright finds its own config, base URL, and installed browsers.
+ * Safe to call on every run — skips writing if the file already exists.
+ */
+function ensureEZTestPlaywrightConfig(testDirectoryAbsolutePath: string): void {
+  const configFilePath = join(testDirectoryAbsolutePath, EZTEST_PLAYWRIGHT_CONFIG_FILENAME);
+  if (existsSync(configFilePath)) return;
+
+  mkdirSync(testDirectoryAbsolutePath, { recursive: true });
+
+  // CommonJS format so it works with any target project's module setup.
+  // testDir '.' means "run all spec files inside the same folder as this config".
+  const configFileContent = [
+    '// @ts-check',
+    '/**',
+    ' * Minimal Playwright configuration written by EZTest.',
+    ' * Runs all .spec.ts files in this directory with a headless browser.',
+    ' * Safe to commit — edit freely to add baseURL, auth, or other settings.',
+    ' */',
+    "const { defineConfig } = require('@playwright/test');",
+    '',
+    'module.exports = defineConfig({',
+    "  testDir: '.',",
+    "  reporter: [['html', { open: 'never' }], ['list']],",
+    '  timeout: 60_000,',
+    '  fullyParallel: false,',
+    '  use: {',
+    '    headless: true,',
+    '    actionTimeout: 15_000,',
+    '  },',
+    '});',
+    '',
+  ].join('\n');
+
+  writeFileSync(configFilePath, configFileContent, 'utf-8');
+}
+
+/**
+ * Runs Playwright tests that live in the EZTest-generated tests directory.
+ * Uses a minimal config file (eztest.playwright.config.js) written into that
+ * directory so Playwright ignores the host project's testDir setting, which
+ * may point somewhere else (e.g. ./e2e).
+ *
+ * The working directory MUST be the target project root so Playwright can
+ * find its locally-installed browsers and node_modules.
  */
 function spawnPlaywrightTestRun(
   runConfig: RunConfig,
   clientSocket: SocketIoSocket,
 ): void {
-  const targetDirectory = runConfig.workingDir ?? process.cwd();
-  const outputDirectory = runConfig.output ?? './tests/e2e';
+  const targetDirectory   = runConfig.workingDir ?? process.cwd();
+  const outputDirectory   = runConfig.output ?? './tests';
+
+  // Resolve absolute path so we can write the config file and pass it to npx
+  const absoluteTestsDir  = resolve(targetDirectory, outputDirectory);
+  const relativeConfigPath = join(outputDirectory, EZTEST_PLAYWRIGHT_CONFIG_FILENAME)
+    // Normalize to forward slashes — Windows paths with backslashes confuse npx
+    .replace(/\\/g, '/');
+
+  // Write the config if it isn't already there (idempotent)
+  ensureEZTestPlaywrightConfig(absoluteTestsDir);
 
   clientSocket.emit('run:log', {
     level: 'info' as LogLevel,
@@ -250,11 +308,16 @@ function spawnPlaywrightTestRun(
   });
   clientSocket.emit('run:log', {
     level: 'info' as LogLevel,
-    message: `Test files: ${outputDirectory}`,
+    message: `Config: ${relativeConfigPath}`,
   });
 
-  // list + html: list streams to the terminal, html builds the clickable report
-  const playwrightArgs = ['playwright', 'test', outputDirectory, '--reporter=list,html'];
+  // --config points Playwright at our minimal config so it uses testDir '.'
+  // instead of whatever testDir the host project's config specifies.
+  const playwrightArgs = [
+    'playwright', 'test',
+    '--config', relativeConfigPath,
+    '--reporter=list,html',
+  ];
 
   spawnAndStreamProcess('npx', playwrightArgs, targetDirectory, clientSocket);
 }
