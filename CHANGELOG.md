@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Version set to `0.1.1`** in `package.json`, `package-lock.json`, `src/cli/index.ts`, and `src/mcp/server.ts`.
+- **Generate / Preview / Run Tests now require a real app URL in the UI** — EZTest prompts for the browser URL before starting these workflows instead of silently falling back to unusable guesses like `http://localhost:3000` or relative Jira paths.
+
+### Fixed
+- **Forge app navigation URLs** — relative Jira paths are now resolved against the configured app URL before they reach generated tests, preventing invalid `page.goto('/jira/...')` navigations.
 
 ## [0.1.0] - 2026-04-13
 

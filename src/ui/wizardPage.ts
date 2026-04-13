@@ -1115,8 +1115,50 @@ export function buildWizardPageHtml(): string {
     // ── Action card handlers ───────────────────────────────────────────────────
 
     /**
-     * Runs the AI test generation workflow immediately using the
-     * scanned source directory as input — no additional config needed.
+     * Prompts for the app URL when EZTest needs a real browser entry point.
+     * Without this, generated tests fall back to guesses like localhost or
+     * relative paths that cannot be opened by Playwright.
+     */
+    function ensureAppUrlBeforeContinuing(runButtonLabel, onUrlReady) {
+      if (appConfig && appConfig.appUrl && appConfig.appUrl.trim()) {
+        onUrlReady(appConfig.appUrl.trim());
+        return;
+      }
+
+      openConfigOverlay(
+        'Tell EZTest where your app opens',
+        'EZTest needs the real page URL before it can generate or run browser tests. Paste the full URL a user opens in the browser. For Jira Forge apps, use the full Atlassian page URL — not just /jira/...',
+        function(container) {
+          container.innerHTML =
+            '<div class="config-input-row">'
+            + '<label>Your app URL</label>'
+            + '<div class="config-input-wrap">'
+            + '<input class="config-input" type="url" id="cfg-required-app-url" placeholder="https://example.com/app" value="' + escapeAttr((appConfig && appConfig.appUrl) || '') + '" />'
+            + '</div>'
+            + '</div>';
+        },
+        function() {
+          var configuredAppUrl = document.getElementById('cfg-required-app-url').value.trim();
+          if (!configuredAppUrl) {
+            document.getElementById('cfg-required-app-url').focus();
+            return false;
+          }
+          fetch('/api/app-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ appUrl: configuredAppUrl })
+          });
+          appConfig.appUrl = configuredAppUrl;
+          onUrlReady(configuredAppUrl);
+          return true;
+        },
+        { runButtonLabel: runButtonLabel },
+      );
+    }
+
+    /**
+     * Runs the AI test generation workflow using the scanned source directory.
+     * A real app URL is required so EZTest does not generate broken browser navigation.
      */
     function handleGenerateTests() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
@@ -1125,8 +1167,14 @@ export function buildWizardPageHtml(): string {
       // appending the sub-directory — mixed slashes confuse Playwright's file glob.
       var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
       var outputDir = normalizedProjectPath + '/tests/';
-      // Pass appUrl so the AI generates tests against the real app URL, not localhost.
-      startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir, url: appConfig.appUrl });
+      ensureAppUrlBeforeContinuing('Save & Generate', function(configuredAppUrl) {
+        startRun('Generating tests\u2026', {
+          workflow: 'generate',
+          source: sourceDir,
+          output: outputDir,
+          url: configuredAppUrl,
+        });
+      });
     }
 
     /**
@@ -1136,7 +1184,14 @@ export function buildWizardPageHtml(): string {
     function handlePreviewPlan() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
       var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
-      startRun('Previewing test plan\u2026', { workflow: 'generate', source: sourceDir, dryRun: true });
+      ensureAppUrlBeforeContinuing('Save & Preview', function(configuredAppUrl) {
+        startRun('Previewing test plan\u2026', {
+          workflow: 'generate',
+          source: sourceDir,
+          url: configuredAppUrl,
+          dryRun: true,
+        });
+      });
     }
 
     /**
@@ -1248,13 +1303,14 @@ export function buildWizardPageHtml(): string {
       // project root, './tests' resolves correctly from that directory.
       var relativeTestsDir = './tests';
 
-      // Reveal "Open last report" link immediately so it persists even after the modal closes
-      document.getElementById('btn-open-last-report').style.display = 'block';
-
-      startRun(
-        'Running tests\u2026',
-        { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot, appUrl: appConfig.appUrl },
-      );
+      ensureAppUrlBeforeContinuing('Save & Run Tests', function(configuredAppUrl) {
+        // Reveal "Open last report" link immediately so it persists even after the modal closes
+        document.getElementById('btn-open-last-report').style.display = 'block';
+        startRun(
+          'Running tests\u2026',
+          { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot, appUrl: configuredAppUrl },
+        );
+      });
     }
 
     /**
@@ -1571,15 +1627,17 @@ export function buildWizardPageHtml(): string {
       if (!lastGenerateRunConfig) { return; }
       var projectRoot = appConfig ? appConfig.projectPath : null;
       lastTestRunWorkingDir = projectRoot;
-
-      startRun(
-        'Running tests\u2026',
-        {
-          workflow:    'run-tests',
-          output:      lastGenerateRunConfig.output,
-          workingDir:  projectRoot || undefined,
-        },
-      );
+      ensureAppUrlBeforeContinuing('Save & Run Tests', function(configuredAppUrl) {
+        startRun(
+          'Running tests\u2026',
+          {
+            workflow:    'run-tests',
+            output:      lastGenerateRunConfig.output,
+            workingDir:  projectRoot || undefined,
+            appUrl:      configuredAppUrl,
+          },
+        );
+      });
     }
 
     /**

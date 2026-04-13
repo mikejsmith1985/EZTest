@@ -127,8 +127,33 @@ ${appSpec.slice(0, maxChars)}
  * the Jira project page, and navigation happens via nav bar button clicks inside the
  * iframe — not via page.goto() to different paths.
  */
-function formatForgeFlowInstructions(forgeAppContext: ForgeAppContext): string {
-  const pageUrl = forgeAppContext.forgeProjectPageUrl || '<FORGE_PROJECT_PAGE_URL>';
+function resolveForgeProjectPageUrl(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const detectedForgeProjectPageUrl = forgeAppContext.forgeProjectPageUrl?.trim();
+  if (!detectedForgeProjectPageUrl) {
+    return '<FORGE_PROJECT_PAGE_URL>';
+  }
+
+  try {
+    return new URL(detectedForgeProjectPageUrl).toString();
+  } catch {
+    // Continue — this is a relative Jira path and needs the configured app URL host.
+  }
+
+  try {
+    return new URL(detectedForgeProjectPageUrl, targetAppUrl).toString();
+  } catch {
+    return detectedForgeProjectPageUrl;
+  }
+}
+
+function formatForgeFlowInstructions(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const pageUrl = resolveForgeProjectPageUrl(forgeAppContext, targetAppUrl);
   return `
 IMPORTANT — JIRA FORGE APP ARCHITECTURE:
 This application is a Jira Forge Custom UI app rendered inside an iframe in Jira Cloud.
@@ -148,8 +173,11 @@ This application is a Jira Forge Custom UI app rendered inside an iframe in Jira
  * Without these patterns, tests will fail immediately because they navigate
  * to internal React Router paths that don't exist as direct browser URLs.
  */
-function formatForgeTestInstructions(forgeAppContext: ForgeAppContext): string {
-  const pageUrl = forgeAppContext.forgeProjectPageUrl || '<FORGE_PROJECT_PAGE_URL>';
+function formatForgeTestInstructions(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const pageUrl = resolveForgeProjectPageUrl(forgeAppContext, targetAppUrl);
   const iframeSel = forgeAppContext.iframeSelector;
   return `
 MANDATORY — JIRA FORGE APP: USE THESE EXACT PATTERNS:
@@ -316,7 +344,7 @@ ${elementList}`;
       role: 'user',
       content: `Identify all USER FLOWS for this application.
 ${formatAppSpecSection(appSpec)}BASE URL: ${targetAppUrl}
-${forgeAppContext ? formatForgeFlowInstructions(forgeAppContext) : ''}
+${forgeAppContext ? formatForgeFlowInstructions(forgeAppContext, targetAppUrl) : ''}
 COMPONENTS:
 ${componentSummaries}
 
@@ -443,7 +471,7 @@ FLOW: ${userFlow.flowName}
 KIND: ${userFlow.flowKind}
 BASE URL: ${targetAppUrl}
 STARTING PATH: ${userFlow.startingUrl}
-${forgeAppContext ? formatForgeTestInstructions(forgeAppContext) : ''}${elementContext}
+${forgeAppContext ? formatForgeTestInstructions(forgeAppContext, targetAppUrl) : ''}${elementContext}
 STEPS:
 ${stepsDescription}
 

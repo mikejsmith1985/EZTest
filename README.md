@@ -241,6 +241,8 @@ eztest mcp
 
 Analyze source code and generate Playwright behavioral tests.
 
+**Important:** always provide the real browser URL for your app. For Jira Forge apps, use the full Atlassian page URL, not a relative `/jira/...` path.
+
 ```
 Options:
   -s, --source <dir>          Source code directory (default: ./src)

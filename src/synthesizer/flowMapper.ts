@@ -126,6 +126,32 @@ interface AiGeneratedFlow {
 }
 
 /**
+ * Resolves an AI-provided starting route into a usable browser URL.
+ * Supports three cases:
+ * 1. Absolute URLs returned by the AI — preserved as-is
+ * 2. Root-relative paths like `/checkout` or `/jira/...` — resolved against the app origin
+ * 3. Empty routes — fall back to the configured base URL
+ */
+function resolveStartingUrl(startingRoute: string, baseUrl: string): string {
+  const normalizedStartingRoute = startingRoute.trim();
+  if (!normalizedStartingRoute) {
+    return baseUrl;
+  }
+
+  try {
+    return new URL(normalizedStartingRoute).toString();
+  } catch {
+    // Continue — this is a relative route, not an absolute URL.
+  }
+
+  try {
+    return new URL(normalizedStartingRoute, baseUrl).toString();
+  } catch {
+    return `${baseUrl}${normalizedStartingRoute}`;
+  }
+}
+
+/**
  * Attempts to recover a valid JSON array from a response that was cut off mid-stream
  * because the model hit its output token limit. Tries two strategies in order:
  *   1. Truncate at the last `},` boundary (end of last complete array item)
@@ -251,7 +277,7 @@ function normalizeAiGeneratedFlow(
 
   return {
     flowName: aiFlow.flowName,
-    startingUrl: `${baseUrl}${aiFlow.startingRoute}`,
+    startingUrl: resolveStartingUrl(aiFlow.startingRoute, baseUrl),
     steps: normalizedSteps,
     involvedComponents: aiFlow.involvedComponents,
     flowKind: aiFlow.flowKind,

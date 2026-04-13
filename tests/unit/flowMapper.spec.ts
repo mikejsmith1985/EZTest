@@ -154,6 +154,35 @@ test.describe('mapComponentAnalysesToUserFlows', () => {
     expect(userFlows[0].startingUrl).toBe('http://localhost:3000/checkout');
   });
 
+  test('preserves an absolute starting URL returned by the AI', async () => {
+    const forgeFlowResponse = JSON.stringify([
+      {
+        flowName: 'User opens the Forge app',
+        startingRoute: 'https://mikejsmith1985.atlassian.net/jira/software/projects/ACRP/apps/example',
+        flowKind: 'happy-path',
+        steps: [
+          {
+            stepDescription: 'Open the Jira project page',
+            targetElementDescription: 'Reports tab',
+            expectedOutcome: 'Forge app loads',
+            isNavigation: true,
+          },
+        ],
+        involvedComponents: ['ReportsHub'],
+        testPriority: 'critical',
+      },
+    ]);
+    const mockAiClient = createMockAiClient(forgeFlowResponse);
+    const components = [createMockComponentAnalysis('ReportsHub')];
+
+    const userFlows = await mapComponentAnalysesToUserFlows(components, mockAiClient, {
+      targetAppUrl: 'https://mikejsmith1985.atlassian.net',
+      shouldAnalyzeIndividualComponents: false,
+    });
+
+    expect(userFlows[0].startingUrl).toBe('https://mikejsmith1985.atlassian.net/jira/software/projects/ACRP/apps/example');
+  });
+
   test('preserves flow kind from AI response (happy-path, error-case, edge-case)', async () => {
     const mockAiClient = createMockAiClient(SAMPLE_FLOW_GENERATION_RESPONSE);
     const components = [createMockComponentAnalysis('CheckoutForm')];
