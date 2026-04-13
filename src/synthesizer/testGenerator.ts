@@ -12,7 +12,7 @@
  */
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
-import type { UserFlow, GeneratedTestFile } from '../shared/types.js';
+import type { UserFlow, GeneratedTestFile, ForgeAppContext } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
 import {
   buildTestCodeGenerationPrompt,
@@ -89,8 +89,9 @@ async function generateTestForFlow(
   appSpec: string | undefined,
   shouldReviewAssertions: boolean,
   feedbackContext?: string,
+  forgeAppContext?: ForgeAppContext,
 ): Promise<GeneratedTestFile | null> {
-  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec, feedbackContext);
+  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec, feedbackContext, forgeAppContext);
 
   let aiResponse;
   try {
@@ -177,6 +178,11 @@ export interface TestGeneratorOptions {
    * Opt-in because it costs an additional AI call across all generated files.
    */
   shouldAuditQuality?: boolean;
+  /**
+   * When present, the target app is a Jira Forge Custom UI app rendered in an iframe.
+   * Injected into test generation prompts to produce iframe-aware test code.
+   */
+  forgeAppContext?: ForgeAppContext;
 }
 
 /** The result of a complete test generation run. */
@@ -200,7 +206,7 @@ export async function generateTestsForFlows(
   aiClient: AiClient,
   options: TestGeneratorOptions,
 ): Promise<TestGenerationResult> {
-  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, feedbackContext, shouldReviewAssertions, shouldAuditQuality } = options;
+  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, feedbackContext, shouldReviewAssertions, shouldAuditQuality, forgeAppContext } = options;
 
   if (userFlows.length === 0) {
     logWarning('No user flows provided to test generator. Nothing to generate.');
@@ -239,6 +245,7 @@ export async function generateTestsForFlows(
       appSpec,
       shouldReviewAssertions,
       feedbackContext,
+      forgeAppContext,
     );
 
     if (!generatedFile) {

@@ -10,7 +10,7 @@
  * A "checkout" button in a cart component leads to a payment form component
  * which leads to a confirmation page. The FlowMapper connects these dots.
  */
-import type { ComponentAnalysis, UserFlow, UserFlowStep } from '../shared/types.js';
+import type { ComponentAnalysis, ForgeAppContext, UserFlow, UserFlowStep } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
 import {
   buildComponentIntentPrompt,
@@ -274,6 +274,11 @@ export interface FlowMapperOptions {
    * intent of the app, not just a mechanical reading of the source code.
    */
   appSpec?: string;
+  /**
+   * When present, the target app is a Jira Forge Custom UI app rendered in an iframe.
+   * The generated flows will use iframe navigation patterns instead of direct URL paths.
+   */
+  forgeAppContext?: ForgeAppContext;
 }
 
 /**
@@ -290,7 +295,7 @@ export async function mapComponentAnalysesToUserFlows(
   aiClient: AiClient,
   options: FlowMapperOptions,
 ): Promise<UserFlow[]> {
-  const { targetAppUrl, shouldAnalyzeIndividualComponents, appSpec } = options;
+  const { targetAppUrl, shouldAnalyzeIndividualComponents, appSpec, forgeAppContext } = options;
 
   // Optionally run per-component intent analysis to enrich the context.
   // Only run this when the component count is small enough to be worthwhile
@@ -335,7 +340,7 @@ export async function mapComponentAnalysesToUserFlows(
       `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
     );
 
-    const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec);
+    const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
     const flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
 
     const batchFlows = parseAiJsonResponse<AiGeneratedFlow[]>(

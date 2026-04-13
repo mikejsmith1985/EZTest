@@ -17,7 +17,7 @@ import { resolve } from 'path';
 import { loadConfig } from '../../shared/config.js';
 import { AiClient } from '../../shared/aiClient.js';
 import { logInfo, logSuccess, logError, logWarning, enableVerboseLogging } from '../../shared/logger.js';
-import { analyzeSourceDirectory } from '../../synthesizer/codeAnalyzer.js';
+import { analyzeSourceDirectory, detectForgeAppContext } from '../../synthesizer/codeAnalyzer.js';
 import { mapComponentAnalysesToUserFlows } from '../../synthesizer/flowMapper.js';
 import {
   generateTestsForFlows,
@@ -224,6 +224,14 @@ export function registerGenerateCommand(program: Command): void {
 
       logSuccess(`Found ${componentAnalyses.length} components with interactive elements`);
 
+      // Detect Jira Forge Custom UI apps — these render in an iframe and require
+      // special navigation patterns (frameLocator + nav button clicks instead of page.goto).
+      const forgeAppContext = detectForgeAppContext(commandOptions.source);
+      if (forgeAppContext) {
+        logInfo(`\n⚡ Jira Forge app detected — generating iframe-aware tests`);
+        logInfo(`   Entry URL: ${forgeAppContext.forgeProjectPageUrl || '(not found — set in app-config.json)'}`);
+      }
+
       // ── Stage 4: Map to user flows ──
       logInfo('\nMapping components to user flows...');
       let userFlows;
@@ -232,6 +240,7 @@ export function registerGenerateCommand(program: Command): void {
           targetAppUrl: commandOptions.url,
           shouldAnalyzeIndividualComponents: commandOptions.deepAnalysis,
           appSpec: appSpec ?? undefined,
+          forgeAppContext: forgeAppContext ?? undefined,
         });
       } catch (mappingError) {
         const errorMessage = mappingError instanceof Error ? mappingError.message : String(mappingError);
@@ -290,6 +299,7 @@ export function registerGenerateCommand(program: Command): void {
           feedbackContext: feedbackContext || undefined,
           shouldReviewAssertions: commandOptions.review,
           shouldAuditQuality: commandOptions.audit,
+          forgeAppContext: forgeAppContext ?? undefined,
         });
       } catch (generationError) {
         logError('Test generation failed', generationError);

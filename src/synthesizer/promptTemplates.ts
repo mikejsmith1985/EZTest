@@ -12,7 +12,7 @@
  * 4. Every happy-path flow MUST have a corresponding error-case and edge-case flow
  * 5. The "So What" rule: if an assertion doesn't verify something a user sees, remove it
  */
-import type { ComponentAnalysis, UserFlow } from '../shared/types.js';
+import type { ComponentAnalysis, ForgeAppContext, UserFlow } from '../shared/types.js';
 import type { AiMessage } from '../shared/types.js';
 
 // ── System Prompts ─────────────────────────────────────────────────────────
@@ -119,6 +119,65 @@ ${appSpec.slice(0, maxChars)}
 `;
 }
 
+/**
+ * Formats Forge app context into a flow-generation prompt section.
+ *
+ * When a Jira Forge Custom UI app is detected, the AI must understand that internal
+ * React Router paths like /dashboard are NOT direct URLs. Every user flow starts at
+ * the Jira project page, and navigation happens via nav bar button clicks inside the
+ * iframe — not via page.goto() to different paths.
+ */
+function formatForgeFlowInstructions(forgeAppContext: ForgeAppContext): string {
+  const pageUrl = forgeAppContext.forgeProjectPageUrl || '<FORGE_PROJECT_PAGE_URL>';
+  return `
+IMPORTANT — JIRA FORGE APP ARCHITECTURE:
+This application is a Jira Forge Custom UI app rendered inside an iframe in Jira Cloud.
+- Tests CANNOT navigate to internal paths like /dashboard, /dsu-board, /story-pointing — these are React Router paths inside the iframe, not real URLs.
+- ALL flows must start at the single Jira page: "${pageUrl}"
+- Navigation between app views is done by CLICKING nav bar buttons (e.g., a button labeled "Team Health"), NOT by changing URLs.
+- The "startingRoute" in every flow must be "${pageUrl}" — the same URL for all flows.
+- Describe navigation steps as "click the [Tab Name] nav button", not "navigate to /path".
+
+`;
+}
+
+/**
+ * Formats Forge app context into the test code generation prompt.
+ *
+ * Provides mandatory code patterns the AI MUST use for Forge apps.
+ * Without these patterns, tests will fail immediately because they navigate
+ * to internal React Router paths that don't exist as direct browser URLs.
+ */
+function formatForgeTestInstructions(forgeAppContext: ForgeAppContext): string {
+  const pageUrl = forgeAppContext.forgeProjectPageUrl || '<FORGE_PROJECT_PAGE_URL>';
+  const iframeSel = forgeAppContext.iframeSelector;
+  return `
+MANDATORY — JIRA FORGE APP: USE THESE EXACT PATTERNS:
+This app renders inside a Jira iframe. You MUST use frameLocator — page.goto('/dashboard') will FAIL.
+
+REQUIRED CONSTANTS (put these at the top of the file, after imports):
+const FORGE_PROJECT_PAGE = '${pageUrl}';
+const IFRAME_LOAD_TIMEOUT_MS = 90_000;
+const TAB_RENDER_TIMEOUT_MS = 30_000;
+
+REQUIRED NAVIGATION PATTERN (use this in every test):
+  await page.goto(FORGE_PROJECT_PAGE);
+  await page.waitForLoadState('load', { timeout: IFRAME_LOAD_TIMEOUT_MS });
+  const vantageFrame = page.frameLocator('${iframeSel}').first();
+  await expect(vantageFrame.locator('nav button').first()).toBeVisible({ timeout: IFRAME_LOAD_TIMEOUT_MS });
+
+TO NAVIGATE TO A VIEW (click nav button, do NOT use page.goto):
+  await vantageFrame.locator('nav button', { hasText: 'Team Health' }).click();
+  await vantageFrame.locator('main').first().waitFor({ state: 'visible', timeout: TAB_RENDER_TIMEOUT_MS });
+
+ALL ASSERTIONS must use vantageFrame, not page:
+  await expect(vantageFrame.getByText(/Sprint/i)).toBeVisible();
+
+DO NOT use page.getByRole() or page.getByText() for app content — it is inside the iframe.
+
+`;
+}
+
 // ── Component Intent Analysis Prompt ──────────────────────────────────────
 
 /**
@@ -211,11 +270,14 @@ Only return valid JSON. No markdown fences, no explanation.`,
  * @param appSpec - Optional plain-English description of the app's purpose.
  *   This is the single biggest quality lever — it tells the AI what the app
  *   is SUPPOSED to do, not just what elements exist in the code.
+ * @param forgeAppContext - When provided, adds Jira Forge iframe navigation instructions.
+ *   Forge apps render inside an iframe — flows must use nav tab clicks, not page.goto().
  */
 export function buildUserFlowGenerationPrompt(
   componentAnalyses: ComponentAnalysis[],
   targetAppUrl: string,
   appSpec?: string,
+  forgeAppContext?: ForgeAppContext,
 ): AiMessage[] {
   // In batch flow generation, we send ALL components in one call. Source code is omitted
   // because including even a small excerpt per component pushes the request past the
@@ -254,7 +316,7 @@ ${elementList}`;
       role: 'user',
       content: `Identify all USER FLOWS for this application.
 ${formatAppSpecSection(appSpec)}BASE URL: ${targetAppUrl}
-
+${forgeAppContext ? formatForgeFlowInstructions(forgeAppContext) : ''}
 COMPONENTS:
 ${componentSummaries}
 
@@ -280,12 +342,15 @@ Only return valid JSON array.`,
  *
  * @param appSpec - Optional plain-English app description. When present, the AI can use
  *   it to resolve ambiguity about what the "correct" expected outcome is.
+ * @param forgeAppContext - When provided, adds mandatory Forge iframe navigation patterns.
+ *   Without this context, Forge app tests will navigate to wrong URLs and fail immediately.
  */
 export function buildTestCodeGenerationPrompt(
   userFlow: UserFlow,
   targetAppUrl: string,
   appSpec?: string,
   feedbackContext?: string,
+  forgeAppContext?: ForgeAppContext,
 ): AiMessage[] {
   const stepsDescription = userFlow.steps
     .map((step, stepIndex) => `Step ${stepIndex + 1}: ${step.actionDescription}
@@ -306,7 +371,7 @@ FLOW: ${userFlow.flowName}
 KIND: ${userFlow.flowKind}
 BASE URL: ${targetAppUrl}
 STARTING PATH: ${userFlow.startingUrl}
-
+${forgeAppContext ? formatForgeTestInstructions(forgeAppContext) : ''}
 STEPS:
 ${stepsDescription}
 
