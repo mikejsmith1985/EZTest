@@ -8,6 +8,31 @@
 let isVerboseMode = false;
 
 /**
+ * When true, all log output is written to stderr instead of stdout.
+ * Must be enabled before starting the MCP stdio server so log lines never
+ * corrupt the JSON-RPC message stream on stdout.
+ */
+let isStderrMode = false;
+
+/**
+ * Redirects all logger output to stderr.
+ * Call this once at the top of the MCP server entry point, before any other
+ * module writes to stdout.
+ */
+export function redirectLoggingToStderr(): void {
+  isStderrMode = true;
+}
+
+/** Writes a message to the appropriate output stream. */
+function writeLog(message: string): void {
+  if (isStderrMode) {
+    process.stderr.write(message + '\n');
+  } else {
+    console.log(message);
+  }
+}
+
+/**
  * Enables verbose debug logging for this process.
  * Typically called once when the --verbose CLI flag is passed.
  */
@@ -25,7 +50,7 @@ export function isVerboseLoggingEnabled(): boolean {
  * Always shown regardless of verbose mode.
  */
 export function logInfo(message: string): void {
-  console.log(`[EZTest] ${message}`);
+  writeLog(`[EZTest] ${message}`);
 }
 
 /**
@@ -33,7 +58,7 @@ export function logInfo(message: string): void {
  * Always shown regardless of verbose mode.
  */
 export function logSuccess(message: string): void {
-  console.log(`[EZTest] ✓ ${message}`);
+  writeLog(`[EZTest] ✓ ${message}`);
 }
 
 /**
@@ -41,7 +66,7 @@ export function logSuccess(message: string): void {
  * Always shown regardless of verbose mode.
  */
 export function logWarning(message: string): void {
-  console.warn(`[EZTest] ⚠ ${message}`);
+  process.stderr.write(`[EZTest] ⚠ ${message}\n`);
 }
 
 /**
@@ -49,9 +74,9 @@ export function logWarning(message: string): void {
  * Always shown regardless of verbose mode.
  */
 export function logError(message: string, error?: unknown): void {
-  console.error(`[EZTest] ✗ ${message}`);
+  process.stderr.write(`[EZTest] ✗ ${message}\n`);
   if (error && isVerboseMode) {
-    console.error(error);
+    process.stderr.write(String(error) + '\n');
   }
 }
 
@@ -61,6 +86,6 @@ export function logError(message: string, error?: unknown): void {
  */
 export function logDebug(message: string): void {
   if (isVerboseMode) {
-    console.log(`[EZTest:debug] ${message}`);
+    writeLog(`[EZTest:debug] ${message}`);
   }
 }

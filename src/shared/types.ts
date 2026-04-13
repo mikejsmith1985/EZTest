@@ -110,8 +110,10 @@ export interface ForgeAppContext {
 export interface UserFlowStep {
   /** Human-readable description of the action (e.g., "Click the Submit button") */
   actionDescription: string;
-  /** The interactive element that drives this action */
+  /** The interactive element that drives this action (resolved from component analysis) */
   targetElement?: InteractiveElement;
+  /** AI's text description of the target element (e.g., "the Submit Order button") */
+  targetElementDescription?: string;
   /** What the user expects to see after taking this action */
   expectedOutcome: string;
   /** Whether this step is a navigation (changes the page URL) */

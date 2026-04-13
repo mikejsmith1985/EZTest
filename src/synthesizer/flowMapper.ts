@@ -243,7 +243,9 @@ function normalizeAiGeneratedFlow(
     actionDescription: step.stepDescription,
     expectedOutcome: step.expectedOutcome,
     isNavigation: step.isNavigation,
-    // We don't have a specific InteractiveElement reference here — the AI describes it in text
+    // Preserve the AI's text description of the target element so the test
+    // generation prompt can reference it when building precise selectors.
+    targetElementDescription: step.targetElementDescription || undefined,
     targetElement: undefined,
   }));
 

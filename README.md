@@ -146,7 +146,94 @@ Create `eztest.config.json` in your project root (all fields optional):
 
 ---
 
+## MCP Server — IDE Integration
+
+EZTest exposes all three engines as [Model Context Protocol](https://modelcontextprotocol.io) tools. Any MCP-capable IDE can call them directly, letting the IDE's AI agent orchestrate your testing workflow conversationally.
+
+### Available Tools
+
+| Tool | What it does |
+|---|---|
+| `analyze_source` | AST-scan a source directory and return a structured UI element summary |
+| `generate_tests` | Full pipeline: source code → user flows → Playwright `.spec.ts` files |
+| `start_recording` | Open your app in a recording browser with the 🚩 annotation overlay (non-blocking) |
+| `get_recording` | Poll a recording session for status and retrieve completed bug reports |
+| `reproduce_bug` | Generate + run a failing Playwright test from a bug report |
+| `fix_and_validate` | Full autonomous loop: reproduce bug → AI fix → validation suite |
+
+### IDE Setup
+
+**VS Code (GitHub Copilot)**
+
+Add to `.vscode/mcp.json` in your project:
+
+```json
+{
+  "servers": {
+    "eztest": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["eztest-mcp"]
+    }
+  }
+}
+```
+
+**Cursor / Windsurf**
+
+Add to your global `~/.cursor/mcp.json` (or `~/.windsurf/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "eztest": {
+      "command": "npx",
+      "args": ["eztest-mcp"]
+    }
+  }
+}
+```
+
+**Claude Code**
+
+```bash
+claude mcp add eztest -- npx eztest-mcp
+```
+
+**Local install (faster cold start)**
+
+```bash
+npm install -g eztest
+# then use "eztest-mcp" instead of "npx eztest-mcp" in the config above
+```
+
+### Example IDE Conversation
+
+Once configured, you can ask your IDE agent:
+
+> *"Analyze my ./src directory and tell me what user flows exist"*
+> *"Generate Playwright tests for my app at http://localhost:3000"*
+> *"Start a recording session so I can flag a bug I found"*
+> *"Take the bug report I just flagged and fix it automatically"*
+
+The agent calls the appropriate EZTest tools, feeds you progress updates, and delivers the results — no terminal required.
+
+---
+
 ## Commands
+
+### `eztest mcp`
+
+Start the EZTest MCP server over stdio (for IDE integration).
+
+```
+# Typically launched automatically by your IDE — see IDE Setup above.
+# To start manually for testing:
+eztest mcp
+```
+
+---
+
 
 ### `eztest generate`
 

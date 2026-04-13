@@ -1,5 +1,5 @@
 /**
- * Unit tests for the Copilot session token manager (copilotAuth.ts).
+ * Unit tests for the Copilot authentication module (copilotAuth.ts).
  * Uses dependency injection (tokenFetcher parameter) instead of module mocking
  * so these tests run cleanly under Playwright's test runner without the gh CLI.
  */
@@ -8,30 +8,23 @@ import {
   getCopilotSessionToken,
   clearCopilotTokenCache,
   parseTokenResponse,
-  TOKEN_REFRESH_BUFFER_MS,
+  TOKEN_CACHE_TTL_MS,
   type CopilotTokenResponse,
 } from '../../src/shared/copilotAuth.js';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-/** Builds a valid JSON response string with a token that expires `offsetMs` from now. */
-function buildTokenJson(offsetMs: number, tokenValue = 'test-session-token'): string {
-  const expiresAt = new Date(Date.now() + offsetMs).toISOString();
-  const response: CopilotTokenResponse = { token: tokenValue, expires_at: expiresAt };
-  return JSON.stringify(response);
-}
-
-/** Creates a fake token fetcher that returns a predetermined JSON string. */
-function createFakeFetcher(jsonResponse: string): () => Promise<string> {
-  return () => Promise.resolve(jsonResponse);
+/** Creates a fake token fetcher that returns a predetermined token string. */
+function createFakeFetcher(tokenValue: string): () => Promise<string> {
+  return () => Promise.resolve(tokenValue);
 }
 
 /** Creates a fake token fetcher that tracks how many times it was called. */
-function createCountingFetcher(jsonResponse: string): { fetch: () => Promise<string>; callCount: number } {
+function createCountingFetcher(tokenValue: string): { fetch: () => Promise<string>; callCount: number } {
   const counter = { callCount: 0, fetch: () => Promise.resolve('') };
   counter.fetch = async () => {
     counter.callCount += 1;
-    return jsonResponse;
+    return tokenValue;
   };
   return counter;
 }
@@ -41,7 +34,7 @@ function createFailingFetcher(errorMessage: string): () => Promise<string> {
   return () => Promise.reject(new Error(errorMessage));
 }
 
-// ── parseTokenResponse ─────────────────────────────────────────────────────
+// ── parseTokenResponse (legacy, kept for backward compatibility) ───────────
 
 test.describe('parseTokenResponse', () => {
   test('returns a parsed response when both required fields are present', () => {
@@ -95,16 +88,16 @@ test.describe('getCopilotSessionToken', () => {
   });
 
   test('fetches a new token via the injected fetcher when the cache is empty', async () => {
-    const fetcher = createCountingFetcher(buildTokenJson(30 * 60 * 1_000));
+    const fetcher = createCountingFetcher('gho_test-oauth-token');
 
     const returnedToken = await getCopilotSessionToken(fetcher.fetch);
 
     expect(fetcher.callCount).toBe(1);
-    expect(returnedToken).toBe('test-session-token');
+    expect(returnedToken).toBe('gho_test-oauth-token');
   });
 
   test('returns the cached token on the second call without invoking the fetcher again', async () => {
-    const fetcher = createCountingFetcher(buildTokenJson(30 * 60 * 1_000));
+    const fetcher = createCountingFetcher('gho_cached-token');
 
     const firstToken  = await getCopilotSessionToken(fetcher.fetch);
     const secondToken = await getCopilotSessionToken(fetcher.fetch);
@@ -113,44 +106,8 @@ test.describe('getCopilotSessionToken', () => {
     expect(firstToken).toBe(secondToken);
   });
 
-  test('refreshes when the cached token is within the 5-minute expiry buffer', async () => {
-    // A token with only 4 minutes remaining — inside the 5-minute refresh buffer
-    const nearlyExpiredMs = TOKEN_REFRESH_BUFFER_MS - 60_000;
-    let callCount = 0;
-
-    const twoCallFetcher = async (): Promise<string> => {
-      callCount += 1;
-      // First call: near-expiry token; second call: fresh 30-minute token
-      return callCount === 1
-        ? buildTokenJson(nearlyExpiredMs,     'old-session-token')
-        : buildTokenJson(30 * 60 * 1_000,     'fresh-session-token');
-    };
-
-    // First call populates the cache with the near-expiry token
-    await getCopilotSessionToken(twoCallFetcher);
-    // Second call should detect the cache is stale and re-fetch
-    const refreshedToken = await getCopilotSessionToken(twoCallFetcher);
-
-    expect(callCount).toBe(2);
-    expect(refreshedToken).toBe('fresh-session-token');
-  });
-
-  test('refreshes when the cached token has already expired', async () => {
-    const expiredTokenMs = -1_000; // 1 second in the past
-    let callCount = 0;
-
-    const twoCallFetcher = async (): Promise<string> => {
-      callCount += 1;
-      return callCount === 1
-        ? buildTokenJson(expiredTokenMs,  'expired-token')
-        : buildTokenJson(30 * 60 * 1_000, 'new-valid-token');
-    };
-
-    await getCopilotSessionToken(twoCallFetcher);
-    const result = await getCopilotSessionToken(twoCallFetcher);
-
-    expect(callCount).toBe(2);
-    expect(result).toBe('new-valid-token');
+  test('TOKEN_CACHE_TTL_MS is 30 minutes', () => {
+    expect(TOKEN_CACHE_TTL_MS).toBe(30 * 60 * 1_000);
   });
 
   test('propagates fetcher errors to the caller', async () => {
@@ -163,8 +120,12 @@ test.describe('getCopilotSessionToken', () => {
 // ── clearCopilotTokenCache ─────────────────────────────────────────────────
 
 test.describe('clearCopilotTokenCache', () => {
+  test.beforeEach(() => {
+    clearCopilotTokenCache();
+  });
+
   test('forces the next getCopilotSessionToken call to fetch from the fetcher', async () => {
-    const fetcher = createCountingFetcher(buildTokenJson(30 * 60 * 1_000));
+    const fetcher = createCountingFetcher('gho_clearable-token');
 
     // Populate the cache
     await getCopilotSessionToken(fetcher.fetch);

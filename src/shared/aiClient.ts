@@ -147,21 +147,42 @@ const COPILOT_EDITOR_HEADERS = {
 } as const;
 
 /**
+ * Minimum delay (in milliseconds) between consecutive Copilot API calls.
+ * The Copilot API aggressively rate-limits with intermittent 403 responses.
+ * A 1.5-second cooldown between calls dramatically reduces the 403 rate,
+ * making the overall pipeline faster than rapid-fire calls + retry backoff.
+ */
+const COPILOT_INTER_REQUEST_DELAY_MS = 1_500;
+
+/** Timestamp of the last successful or attempted Copilot API call. */
+let lastCopilotRequestTimestamp = 0;
+
+/**
  * Adapter for the GitHub Copilot Chat API (api.githubcopilot.com).
  *
  * Benefits over the GitHub Models free tier:
  *   - 16 384 output tokens vs 4 096 — eliminates most batch-splitting overhead
  *   - No per-model daily request quotas (gpt-4.1 and gpt-5-mini are 0x premium)
- *   - Session token auto-refreshed via the gh CLI — no separate API key required
+ *   - OAuth token auto-fetched via `gh auth token` — no separate API key required
  *
- * Auth is handled by `getCopilotSessionToken()` which calls
- * `gh api /copilot_internal/v2/token` using the stored gh CLI credentials.
+ * Auth uses the gh CLI's keyring-stored OAuth token (with `copilot` scope).
+ * The token is cached by `getCopilotSessionToken()` to avoid spawning a
+ * subprocess on every API call.
  */
 async function createCopilotChatApiAdapter(): Promise<ProviderAdapter> {
   const { default: OpenAI } = await import('openai');
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
+      // Proactive cooldown: wait between consecutive requests to avoid
+      // triggering the Copilot API's aggressive 403 rate limiter
+      const elapsedSinceLastRequest = Date.now() - lastCopilotRequestTimestamp;
+      if (elapsedSinceLastRequest < COPILOT_INTER_REQUEST_DELAY_MS) {
+        await new Promise(resolve =>
+          setTimeout(resolve, COPILOT_INTER_REQUEST_DELAY_MS - elapsedSinceLastRequest),
+        );
+      }
+
       // Refresh the session token if it is near expiry — typically a no-op due to caching
       const sessionToken = await getCopilotSessionToken();
 
@@ -175,6 +196,7 @@ async function createCopilotChatApiAdapter(): Promise<ProviderAdapter> {
       // Respect the caller's configured maxTokens but cap at the Copilot API's limit
       const effectiveMaxTokens = Math.min(maxTokens, COPILOT_MAX_OUTPUT_TOKENS);
 
+      lastCopilotRequestTimestamp = Date.now();
       const response = await copilotClient.chat.completions.create({
         model:      modelName,
         messages,
@@ -237,7 +259,7 @@ async function createAnthropicAdapter(apiKey: string): Promise<ProviderAdapter> 
 // ── Retry Logic ────────────────────────────────────────────────────────────
 
 /** HTTP status codes that indicate a transient failure worth retrying. */
-const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+const RETRYABLE_STATUS_CODES = new Set([403, 429, 500, 502, 503, 504]);
 
 /** Base delay in milliseconds for exponential backoff on retries. */
 const RETRY_BASE_DELAY_MS = 1000;
@@ -254,16 +276,20 @@ const MAX_RETRYABLE_DELAY_MS = 300_000; // 5 minutes — anything longer signals
  * Determines whether an error is a transient API failure that should be retried.
  * Token-limit errors (413 tokens_limit_reached) are included because GitHub Models
  * uses them for BOTH per-request size violations and per-minute TPM rate limits.
+ * The Copilot API (api.githubcopilot.com) intermittently returns 403 "forbidden"
+ * under rate-limiting conditions instead of the standard 429 — we treat these as
+ * transient and retry with backoff.
  */
 function isTransientApiError(error: unknown): boolean {
   if (error instanceof Error) {
     const errorMessage = error.message.toLowerCase();
-    // Rate limits, token limits, and server errors are worth retrying
+    // Rate limits, token limits, server errors, and Copilot API transient 403s
     if (
       errorMessage.includes('rate limit') ||
       errorMessage.includes('overloaded') ||
       errorMessage.includes('tokens_limit_reached') ||
-      errorMessage.includes('too many requests')
+      errorMessage.includes('too many requests') ||
+      errorMessage.includes('access to this endpoint is forbidden')
     ) {
       return true;
     }
@@ -536,12 +562,18 @@ export class AiClient {
 
         const nextModelIndex = this.activeModelIndex + 1;
         if (nextModelIndex >= this.modelRotationList.length) {
+          const providerLabel = this.aiConfig.provider === 'copilot'
+            ? 'Copilot API 0x-premium'
+            : 'GitHub Models free-tier';
           throw new Error(
-            `All ${this.modelRotationList.length} models in the ` +
-            `${this.aiConfig.provider === 'copilot' ? 'Copilot API 0x-premium' : 'GitHub Models free-tier'} rotation ` +
-            `have exhausted their quota. ` +
-            `Please wait for quotas to reset (usually at midnight UTC) ` +
-            `or configure a different AI provider in your .env file.`,
+            `All ${this.modelRotationList.length} models in the ${providerLabel} rotation ` +
+            `have exhausted their daily quota. Options:\n` +
+            `  • Wait for quotas to reset (usually midnight UTC)\n` +
+            `  • Use --no-review or --max-flows 5 to reduce API calls per run\n` +
+            (this.aiConfig.provider === 'github'
+              ? `  • Set EZTEST_AI_PROVIDER=copilot (requires GitHub Copilot Pro — no daily quotas)\n`
+              : '') +
+            `  • Configure a paid provider: OPENAI_API_KEY or ANTHROPIC_API_KEY in your .env`,
           );
         }
 
@@ -568,5 +600,19 @@ export class AiClient {
   /** Returns the provider name being used. */
   get providerName(): string {
     return this.aiConfig.provider;
+  }
+
+  /** Returns the total number of models in the rotation list. */
+  get rotationSize(): number {
+    return this.modelRotationList.length;
+  }
+
+  /**
+   * Returns true when the provider uses a daily-capped free-tier model rotation.
+   * Callers use this to make quota-aware decisions (e.g., auto-disabling expensive
+   * second-pass features when a run would burn through multiple model quotas).
+   */
+  get hasFreeTierQuotaLimits(): boolean {
+    return this.aiConfig.provider === 'github';
   }
 }

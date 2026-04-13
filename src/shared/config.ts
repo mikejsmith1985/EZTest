@@ -55,8 +55,12 @@ const DEFAULT_ANNOTATION_SERVER_PORT = 7432;
 /** How many tokens we allow per AI call — balances cost vs. completeness. */
 const DEFAULT_MAX_TOKENS_PER_CALL = 4096;
 
-/** Number of retry attempts for transient AI API failures. */
-const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
+/**
+ * Number of retry attempts for transient AI API failures.
+ * Set to 5 because the Copilot API intermittently returns 403 under load and
+ * typically succeeds within 2-4 retries with exponential backoff.
+ */
+const DEFAULT_MAX_RETRY_ATTEMPTS = 5;
 
 const DEFAULT_CONFIG: EZTestConfig = {
   ai: {
@@ -219,14 +223,11 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
       environmentOverrides.apiKey = matchingApiKey;
       environmentOverrides.provider = requestedProvider;
     }
-    // copilot provider requires no separate key — the gh CLI handles auth internally.
-    // If explicitly requested and a GitHub token exists, honour it.
+    // copilot provider authenticates via `gh auth token` — no env var key needed.
+    // Set a sentinel apiKey so the AiClient initialize() guard doesn't reject it.
     if (requestedProvider === 'copilot') {
-      const githubToken = process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'];
-      if (githubToken) {
-        environmentOverrides.apiKey  = githubToken;
-        environmentOverrides.provider = 'copilot';
-      }
+      environmentOverrides.apiKey  = 'copilot-via-gh-cli';
+      environmentOverrides.provider = 'copilot';
     }
     // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
     // whatever provider/key was detected from the keys that ARE present.
@@ -357,20 +358,19 @@ export function getDefaultModelForProvider(provider: AiProviderName): string {
 // ── GitHub Copilot API Free-Tier Rotation ──────────────────────────────────
 
 /**
- * Ordered list of Copilot API model IDs that cost ZERO premium requests (0x multiplier).
- * As of April 2026, only gpt-4.1 and gpt-5-mini are confirmed 0x for Copilot Pro.
+ * Ordered list of Copilot API model IDs for the model rotation.
+ * gpt-4.1 and gpt-5-mini are 0x premium (free) for Copilot Pro/Pro+ subscribers.
+ * Additional models consume premium requests but serve as robust fallbacks.
  *
  * Ordering rationale:
- *   - gpt-4.1 first: proven JSON reliability, best code analysis in the 0x tier
- *   - gpt-5-mini second: newer architecture, solid fallback
- *
- * Excluded intentionally (all consume premium requests):
- *   - GPT-5.4, GPT-5.3-Codex, GPT-5.2-Codex, GPT-5.2, GPT-5.1  (1x each)
- *   - GPT-5.4 mini, Claude Haiku 4.5                              (0.33x each)
- *   - Claude Sonnet 4.6/4.5/4                                     (1x each)
- *   - Claude Opus 4.6/4.5                                         (3x each)
+ *   - gpt-4.1 first: proven JSON reliability, best code analysis, 0x premium
+ *   - gpt-5-mini second: newer architecture, 0x premium
+ *   - gpt-5.4-mini third: strong quality at 0.33x premium cost
+ *   - claude-sonnet-4.6 fourth: excellent code generation at 1x premium
  */
 export const COPILOT_FREE_MODEL_ROTATION: readonly string[] = [
-  'gpt-4.1',    // 0x — flagship code model, proven JSON + instruction following
-  'gpt-5-mini', // 0x — newer architecture, good fallback when gpt-4.1 is unavailable
+  'gpt-4.1',           // 0x — flagship code model, proven JSON + instruction following
+  'gpt-5-mini',        // 0x — newer architecture, good fallback
+  'gpt-5.4-mini',      // 0.33x — strong quality, low premium cost
+  'claude-sonnet-4.6', // 1x — excellent code generation fallback
 ] as const;

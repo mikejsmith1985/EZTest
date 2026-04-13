@@ -333,6 +333,64 @@ Only return valid JSON array.`,
   ];
 }
 
+// ── Element Context for Test Generation ────────────────────────────────────
+
+/**
+ * Maximum characters of source code per component included in the test generation prompt.
+ * Test generation runs one flow at a time (not batched), so we can afford more context
+ * than flow generation. This gives the AI enough JSX structure to understand the DOM.
+ */
+const MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT = 3000;
+
+/**
+ * Builds a section describing the actual interactive elements available in the components
+ * involved in a user flow. This gives the test-writing AI concrete selectors (aria-labels,
+ * test IDs, text content, element roles) instead of forcing it to guess from text descriptions.
+ *
+ * Without this context, the AI falls back to trivial "page loads" assertions because it
+ * cannot know what DOM elements actually exist or what selectors will locate them.
+ */
+function buildElementContextSection(involvedComponentAnalyses: ComponentAnalysis[]): string {
+  if (involvedComponentAnalyses.length === 0) return '';
+
+  const componentSections = involvedComponentAnalyses.map(analysis => {
+    const elementDescriptions = analysis.interactiveElements.map(element => {
+      const parts = [`  - ${element.elementKind.toUpperCase()}`];
+      if (element.textContent) parts.push(`text: "${element.textContent}"`);
+      if (element.ariaLabel) parts.push(`aria-label: "${element.ariaLabel}"`);
+      if (element.testId) parts.push(`testId: "${element.testId}"`);
+      if (element.handlerName) parts.push(`handler: ${element.handlerName}`);
+      if (element.classNames?.length) parts.push(`classes: [${element.classNames.join(', ')}]`);
+      return parts.join(', ');
+    }).join('\n');
+
+    // Include a truncated source excerpt so the AI sees the JSX structure
+    const sourceExcerpt = analysis.sourceCode.length > MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT
+      ? analysis.sourceCode.slice(0, MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT) + '\n[...truncated]'
+      : analysis.sourceCode;
+
+    return `### ${analysis.componentName}${analysis.routePath ? ` (route: ${analysis.routePath})` : ''}
+Elements:
+${elementDescriptions}
+
+Source excerpt:
+\`\`\`tsx
+${sourceExcerpt}
+\`\`\``;
+  }).join('\n\n');
+
+  return `
+AVAILABLE INTERACTIVE ELEMENTS (these are the REAL elements in the DOM — use them for precise selectors):
+${componentSections}
+
+SELECTOR STRATEGY — use the element metadata above to write PRECISE locators:
+- If an element has an aria-label → getByLabel("exact aria-label value")
+- If an element has a testId → getByTestId("testId value")
+- If an element has visible text → getByRole('button', { name: 'visible text' }) or getByText('visible text')
+- NEVER guess selectors — if you cannot find a matching element above, use the most specific text match available
+`;
+}
+
 // ── Test Code Generation Prompt ────────────────────────────────────────────
 
 /**
@@ -344,6 +402,9 @@ Only return valid JSON array.`,
  *   it to resolve ambiguity about what the "correct" expected outcome is.
  * @param forgeAppContext - When provided, adds mandatory Forge iframe navigation patterns.
  *   Without this context, Forge app tests will navigate to wrong URLs and fail immediately.
+ * @param involvedComponentAnalyses - Component analyses for the components involved in this
+ *   flow. Provides the AI with real element metadata (aria-labels, testIds, text, handlers)
+ *   so it can write precise selectors instead of guessing and falling back to smoke tests.
  */
 export function buildTestCodeGenerationPrompt(
   userFlow: UserFlow,
@@ -351,12 +412,23 @@ export function buildTestCodeGenerationPrompt(
   appSpec?: string,
   feedbackContext?: string,
   forgeAppContext?: ForgeAppContext,
+  involvedComponentAnalyses?: ComponentAnalysis[],
 ): AiMessage[] {
   const stepsDescription = userFlow.steps
-    .map((step, stepIndex) => `Step ${stepIndex + 1}: ${step.actionDescription}
-  → Expected visible outcome: ${step.expectedOutcome}
-  → Navigation: ${step.isNavigation ? 'yes (URL changes)' : 'no'}`)
+    .map((step, stepIndex) => {
+      let description = `Step ${stepIndex + 1}: ${step.actionDescription}`;
+      if (step.targetElementDescription) {
+        description += `\n  → Target element: ${step.targetElementDescription}`;
+      }
+      description += `\n  → Expected visible outcome: ${step.expectedOutcome}`;
+      description += `\n  → Navigation: ${step.isNavigation ? 'yes (URL changes)' : 'no'}`;
+      return description;
+    })
     .join('\n');
+
+  const elementContext = involvedComponentAnalyses && involvedComponentAnalyses.length > 0
+    ? buildElementContextSection(involvedComponentAnalyses)
+    : '';
 
   return [
     {
@@ -371,20 +443,28 @@ FLOW: ${userFlow.flowName}
 KIND: ${userFlow.flowKind}
 BASE URL: ${targetAppUrl}
 STARTING PATH: ${userFlow.startingUrl}
-${forgeAppContext ? formatForgeTestInstructions(forgeAppContext) : ''}
+${forgeAppContext ? formatForgeTestInstructions(forgeAppContext) : ''}${elementContext}
 STEPS:
 ${stepsDescription}
 
 REQUIREMENTS:
 1. Import from @playwright/test only — no application source imports
 2. Use page.getByRole(), page.getByLabel(), page.getByText(), page.getByPlaceholder() for locators
-3. EVERY step must have at least one expect() assertion on what the user SEES — not what code executes
+3. EVERY step MUST have at least one expect() assertion on what the user SEES — not what code executes
 4. Use await expect(locator).toBeVisible() / toHaveText() / toBeEnabled() / toHaveURL() etc.
 5. Do NOT use page.waitForTimeout() — let Playwright auto-wait
 6. For error-case flows: assert the error message is VISIBLE and READABLE to the user
 7. For edge-case flows: assert the graceful handling is visible (empty state message, disabled button, etc.)
 8. Include a descriptive test name that describes the USER OUTCOME, not the technical operation
 9. Apply the SO WHAT rule to every assertion: if the user wouldn't notice it, remove it
+
+CRITICAL — DO NOT WRITE SMOKE TESTS:
+- A test that ONLY navigates to a page and checks "something is visible" is WORTHLESS
+- Every test MUST interact with at least one element (click a button, fill a form, select an option)
+- Every test MUST assert on a SPECIFIC outcome (exact text, specific element state, URL change) — not just "page has content"
+- If the flow says "user clicks Submit", the test MUST click the Submit button AND assert on what happens AFTER
+- Regex matchers like /Submit|Cancel|Loading/i that match ANY of several unrelated words are FORBIDDEN — assert on the SPECIFIC expected text
+- A test that passes when the feature is completely broken is worse than no test at all
 
 Output ONLY the complete TypeScript test file content. No explanation, no markdown fences.
 The file should be ready to run with \`playwright test\`.${feedbackContext ? `\n\n${feedbackContext}` : ''}`,

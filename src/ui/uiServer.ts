@@ -684,7 +684,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     const hasGithubKey   = Boolean((process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])?.trim());
     const hasOpenAiKey    = Boolean(process.env['OPENAI_API_KEY']?.trim());
     const hasAnthropicKey = Boolean(process.env['ANTHROPIC_API_KEY']?.trim());
-    const hasAnyApiKey    = hasGithubKey || hasOpenAiKey || hasAnthropicKey;
+    const isCopilotProvider = process.env['EZTEST_AI_PROVIDER'] === 'copilot';
+    const hasAnyApiKey    = hasGithubKey || hasOpenAiKey || hasAnthropicKey || isCopilotProvider;
 
     // Playwright can be in node_modules/.bin with or without .cmd (Windows)
     const playwrightBinPath    = join(process.cwd(), 'node_modules', '.bin', 'playwright');
@@ -698,6 +699,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       },
       apiKey: {
         hasGithub:   hasGithubKey,
+        hasCopilot:  isCopilotProvider,
         hasOpenAi:   hasOpenAiKey,
         hasAnthropic: hasAnthropicKey,
         ok: hasAnyApiKey,
@@ -720,10 +722,19 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     // Map provider name to the correct environment variable name
     const envKeyMap: Record<string, string> = {
       github:    'EZTEST_GITHUB_TOKEN',
+      copilot:   'EZTEST_AI_PROVIDER',
       openai:    'OPENAI_API_KEY',
       anthropic: 'ANTHROPIC_API_KEY',
     };
     const envKeyName = envKeyMap[provider] ?? 'OPENAI_API_KEY';
+
+    // Copilot provider authenticates via `gh auth token` — no API key to persist.
+    // Only write the provider name; skip the key write.
+    if (provider === 'copilot') {
+      persistEnvKey('EZTEST_AI_PROVIDER', 'copilot');
+      res.json({ saved: true });
+      return;
+    }
 
     persistEnvKey(envKeyName, apiKey);
     persistEnvKey('EZTEST_AI_PROVIDER', provider);

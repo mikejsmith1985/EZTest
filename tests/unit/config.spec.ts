@@ -56,7 +56,7 @@ test.describe('loadConfig', () => {
       expect(config.isVerboseLogging).toBe(false);
       expect(config.ai.provider).toBe('openai');
       expect(config.ai.maxTokensPerCall).toBe(4096);
-      expect(config.ai.maxRetryAttempts).toBe(3);
+      expect(config.ai.maxRetryAttempts).toBe(5);
     });
   });
 

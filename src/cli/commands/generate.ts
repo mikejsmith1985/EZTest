@@ -44,6 +44,14 @@ const DEFAULT_MAX_COMPONENT_COUNT = 400;
 const DEFAULT_MAX_FLOW_COUNT = 10;
 
 /**
+ * GitHub Models HIGH-tier models (gpt-4.1, gpt-4o) allow 50 requests per day.
+ * When a single generation run's remaining API calls would exceed this threshold,
+ * the assertion review pass is auto-disabled to avoid cascading through multiple
+ * model quotas unnecessarily. Users can force-enable review with --review.
+ */
+const GITHUB_FREE_TIER_QUOTA_THRESHOLD = 45;
+
+/**
  * Registers the `generate` subcommand on the given Commander program instance.
  * All options have sensible defaults pulled from the loaded config.
  */
@@ -251,11 +259,12 @@ export function registerGenerateCommand(program: Command): void {
 
         if (isQuotaExhausted) {
           logError(
-            'AI API quota exhausted. Your GitHub Models free-tier daily limit has been reached.\n' +
+            'AI API quota exhausted during flow mapping. Your GitHub Models free-tier daily limit has been reached.\n' +
             '  Options:\n' +
             '  1. Wait for your quota to reset (usually resets at midnight UTC)\n' +
-            '  2. Set OPENAI_API_KEY or ANTHROPIC_API_KEY in your .env for a paid provider\n' +
-            '  3. Run again tomorrow when the free-tier quota resets',
+            '  2. Use --no-review to halve API calls on the next run\n' +
+            '  3. Set EZTEST_AI_PROVIDER=copilot in your .env (requires GitHub Copilot Pro — no daily quotas)\n' +
+            '  4. Set OPENAI_API_KEY or ANTHROPIC_API_KEY in your .env for a paid provider',
           );
         } else {
           logError('User flow mapping failed', mappingError);
@@ -283,9 +292,38 @@ export function registerGenerateCommand(program: Command): void {
         : '';
       logSuccess(`Identified ${userFlows.length} user flows (generating tests for ${flowsToGenerate.length}${flowCountNote})`);
 
+      // ── Quota-aware review optimization ──────────────────────────────────
+      // On the GitHub Models free tier, HIGH-tier models allow ~50 requests/day.
+      // If the assertion review pass would push total remaining API calls above
+      // that threshold in a single run, auto-disable it so the user doesn't churn
+      // through multiple model quotas unnecessarily. This only triggers when
+      // --max-flows is set high enough to exceed the budget.
+      let isReviewEnabled = commandOptions.review;
+      if (isReviewEnabled && aiClient.hasFreeTierQuotaLimits) {
+        const estimatedCallsWithReview = flowsToGenerate.length * 2;
+        if (estimatedCallsWithReview > GITHUB_FREE_TIER_QUOTA_THRESHOLD) {
+          isReviewEnabled = false;
+          logWarning(
+            `Auto-disabled assertion review: ${estimatedCallsWithReview} estimated API calls would exceed ` +
+            `the GitHub Models free-tier quota (~${GITHUB_FREE_TIER_QUOTA_THRESHOLD} req/model/day). ` +
+            `Saving ${flowsToGenerate.length} API calls. Pass --no-review to silence this warning.`,
+          );
+        }
+      }
+
+      // Log a pre-flight estimate so users on free tiers know what to expect.
+      // This runs after flow capping and review decisions are final.
+      const estimatedRemainingCalls = flowsToGenerate.length * (isReviewEnabled ? 2 : 1);
+      logInfo(`\n  Estimated remaining API calls: ${estimatedRemainingCalls} ` +
+        `(${flowsToGenerate.length} test gen${isReviewEnabled ? ` + ${flowsToGenerate.length} review` : ''})`);
+      if (aiClient.hasFreeTierQuotaLimits) {
+        logInfo(`  Provider: ${aiClient.providerName} / ${aiClient.modelName} ` +
+          `(${aiClient.rotationSize} models in rotation — auto-rotates on quota exhaustion)`);
+      }
+
       // ── Stage 4: Generate test files ──
       logInfo('\nGenerating Playwright test files...');
-      if (commandOptions.review) {
+      if (isReviewEnabled) {
         logInfo('  Behavioral assertion review pass: ENABLED');
       }
 
@@ -297,9 +335,10 @@ export function registerGenerateCommand(program: Command): void {
           shouldWriteFilesToDisk: !commandOptions.dryRun,
           appSpec: appSpec ?? undefined,
           feedbackContext: feedbackContext || undefined,
-          shouldReviewAssertions: commandOptions.review,
+          shouldReviewAssertions: isReviewEnabled,
           shouldAuditQuality: commandOptions.audit,
           forgeAppContext: forgeAppContext ?? undefined,
+          componentAnalyses,
         });
       } catch (generationError) {
         logError('Test generation failed', generationError);
