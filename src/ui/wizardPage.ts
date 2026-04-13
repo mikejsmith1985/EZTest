@@ -961,7 +961,10 @@ export function buildWizardPageHtml(): string {
     function handleGenerateTests() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
       var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
-      var outputDir = appConfig.projectPath + '/tests/';
+      // Normalize Windows backslashes so the path separator is consistent before
+      // appending the sub-directory — mixed slashes confuse Playwright's file glob.
+      var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
+      var outputDir = normalizedProjectPath + '/tests/';
       startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir });
     }
 
@@ -1075,7 +1078,10 @@ export function buildWizardPageHtml(): string {
      */
     function handleRunTestsFromCard() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
-      var outputDir    = appConfig.projectPath + '/tests/';
+      // Normalize Windows backslashes to forward slashes — Playwright accepts both
+      // on Windows, but a mixed-separator path (C:\Foo/tests/) causes "No tests found".
+      var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
+      var outputDir    = normalizedProjectPath + '/tests/';
       var projectRoot  = appConfig.projectPath;
       lastTestRunWorkingDir = projectRoot;
 
