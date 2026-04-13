@@ -297,7 +297,22 @@ function writeEZTestPlaywrightConfig(
   lines.push('', 'module.exports = defineConfig({');
   lines.push("  testDir: '.',");
   lines.push("  reporter: [['html', { open: 'never' }], ['list']],");
-  lines.push('  timeout: 60_000,');
+
+  // Auth-based tests (cloud apps like Jira Forge) require generous timeouts.
+  // The Forge iframe alone needs up to 90 seconds to load — a 60s test timeout
+  // causes every test to fail before the iframe even appears.
+  // When an auth session is present, assume cloud/remote app and use safe timeouts.
+  const testTimeoutMs = foundAuthRelativePath ? 120_000 : 60_000;
+  lines.push(`  timeout: ${testTimeoutMs.toLocaleString('en-US').replace(/,/g, '_')},`);
+
+  // Limit parallelism for auth-based apps. Running 16 workers against a cloud service
+  // (e.g. Jira, GitHub) with a shared session file causes throttling and session
+  // invalidation — most tests fail even though the app is perfectly fine.
+  // 2 workers: fast enough (2x speedup), safe enough (won't hammer the rate limiter).
+  if (foundAuthRelativePath) {
+    lines.push('  workers: 2,');
+  }
+
   lines.push('  fullyParallel: false,');
   lines.push('  use: {');
 
@@ -312,6 +327,11 @@ function writeEZTestPlaywrightConfig(
 
   lines.push('    headless: true,');
   lines.push('    actionTimeout: 15_000,');
+  // Cloud apps like Jira need longer navigation timeouts — the SPA shell
+  // takes 30-60s to fully load before the iframe becomes interactive.
+  if (foundAuthRelativePath) {
+    lines.push('    navigationTimeout: 90_000,');
+  }
   lines.push('  },');
   lines.push('});');
   lines.push('');
@@ -491,6 +511,151 @@ function scanProjectDirectory(projectPath: string): ProjectScanResult {
 }
 
 // ── Server factory ─────────────────────────────────────────────────────────────
+
+// ── EZTest Report Theme Injection ─────────────────────────────────────────────
+
+/** Sentinel comment written into the report so we only inject our CSS once per file. */
+const EZTEST_THEME_SENTINEL = '<!-- eztest-theme-injected -->';
+
+/**
+ * Injects a custom EZTest color theme into a Playwright HTML report file.
+ *
+ * The default Playwright report uses drab charcoal-on-black tones that make it
+ * hard to quickly distinguish pass/fail at a glance. This post-processes the
+ * generated HTML to inject CSS variable overrides that make the report vivid and
+ * readable — rich navy background, bright status colors, high-contrast text.
+ *
+ * The sentinel comment prevents double-injection if the report is opened multiple times.
+ * Silently skips if the file cannot be read or written.
+ */
+function injectEZTestThemeIntoReport(reportIndexPath: string): void {
+  try {
+    const originalHtml = readFileSync(reportIndexPath, 'utf-8');
+
+    // Skip if we already injected the theme in a previous open
+    if (originalHtml.includes(EZTEST_THEME_SENTINEL)) return;
+
+    const themeStyleBlock = `
+${EZTEST_THEME_SENTINEL}
+<style id="eztest-theme">
+  /* ── EZTest Report Theme — overrides Playwright's default dark palette ── */
+
+  /* Rich navy/indigo background instead of pure black */
+  body {
+    background: #080c18 !important;
+    background-image:
+      radial-gradient(ellipse 80% 40% at 20% 0%, rgba(29, 78, 216, 0.12) 0%, transparent 60%),
+      radial-gradient(ellipse 60% 40% at 80% 100%, rgba(109, 40, 217, 0.08) 0%, transparent 60%) !important;
+    background-attachment: fixed !important;
+  }
+
+  /* Override Playwright's GitHub Primer CSS variables for the dark theme */
+  html, :root {
+    --color-canvas-default:   #0d1117 !important;
+    --color-canvas-subtle:    #161b22 !important;
+    --color-canvas-inset:     #010409 !important;
+    --color-canvas-overlay:   #1c2128 !important;
+    --color-border-default:   #1e3a5f !important;
+    --color-border-muted:     #21262d !important;
+    --color-border-subtle:    #1b2434 !important;
+    --color-fg-default:       #e6edf3 !important;
+    --color-fg-muted:         #8b949e !important;
+    --color-fg-subtle:        #6e7681 !important;
+    /* Vivid accent — electric blue */
+    --color-accent-fg:        #58a6ff !important;
+    --color-accent-emphasis:  #1f6feb !important;
+    /* Pass = vivid emerald, Fail = vivid rose */
+    --color-success-fg:       #3fb950 !important;
+    --color-success-emphasis: #238636 !important;
+    --color-danger-fg:        #f85149 !important;
+    --color-danger-emphasis:  #da3633 !important;
+  }
+
+  /* Top filter bar — give it a branded indigo gradient */
+  .subnav, [class*="subnav"], nav {
+    background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%) !important;
+    border-bottom: 1px solid #312e81 !important;
+    box-shadow: 0 4px 24px rgba(99, 102, 241, 0.15) !important;
+  }
+
+  /* Tab buttons: All / Passed / Failed / Flaky / Skipped */
+  .subnav-item, [class*="subnav-item"] {
+    color: #94a3b8 !important;
+    border-color: transparent !important;
+  }
+  .subnav-item[aria-selected="true"], [class*="subnav-item"][aria-selected="true"] {
+    color: #e6edf3 !important;
+    border-bottom: 2px solid #6366f1 !important;
+    background: rgba(99, 102, 241, 0.1) !important;
+  }
+
+  /* Test file accordion headers */
+  .test-file-summary, [class*="test-file"] {
+    background: #161b22 !important;
+    border: 1px solid #1e3a5f !important;
+    border-radius: 8px !important;
+  }
+
+  /* Failed test rows — rose left-border glow */
+  [class*="unexpected"], .outcome-unexpected {
+    border-left: 3px solid #f85149 !important;
+    background: rgba(248, 81, 73, 0.06) !important;
+  }
+
+  /* Passed test rows — emerald left-border */
+  [class*="expected"]:not([class*="unexpected"]), .outcome-expected {
+    border-left: 3px solid #3fb950 !important;
+    background: rgba(63, 185, 80, 0.04) !important;
+  }
+
+  /* Status count badges next to tab labels */
+  [class*="counter"], .Counter {
+    background: #1e3a5f !important;
+    color: #58a6ff !important;
+    border-radius: 999px !important;
+    font-weight: 600 !important;
+  }
+
+  /* Search input */
+  input[type="text"], input[type="search"] {
+    background: #161b22 !important;
+    border: 1px solid #30363d !important;
+    color: #e6edf3 !important;
+    border-radius: 6px !important;
+    box-shadow: inset 0 1px 4px rgba(0, 0, 0, 0.4) !important;
+  }
+  input[type="text"]:focus, input[type="search"]:focus {
+    border-color: #58a6ff !important;
+    outline: none !important;
+    box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15) !important;
+  }
+
+  /* Duration / timing labels */
+  [class*="duration"], [class*="timing"] {
+    color: #6e7681 !important;
+    font-size: 0.85em !important;
+  }
+
+  /* Make the test title text bright white — the most important text in the report */
+  [class*="title"], [class*="testName"], [class*="test-name"] {
+    color: #f0f6fc !important;
+    font-weight: 500 !important;
+  }
+
+  /* File path labels under test names — muted but readable */
+  [class*="location"], [class*="fileName"] {
+    color: #58a6ff !important;
+    font-size: 0.82em !important;
+  }
+</style>`;
+
+    // Inject before </head> so styles load before the React app mounts
+    const patchedHtml = originalHtml.replace('</head>', `${themeStyleBlock}\n</head>`);
+    writeFileSync(reportIndexPath, patchedHtml, 'utf-8');
+  } catch {
+    // Non-fatal: if injection fails, the report still opens — just with default colors
+  }
+}
 
 /**
  * Starts the Express + Socket.io wizard server on the given port.
@@ -701,6 +866,10 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       res.status(404).json({ opened: false, error: 'Report not found at: ' + reportIndexPath });
       return;
     }
+
+    // Inject the EZTest color theme before opening — makes the report visually compelling
+    // instead of the default drab charcoal-on-black Playwright palette.
+    injectEZTestThemeIntoReport(reportIndexPath);
 
     // `start "" "path"` opens the file with the system default browser on Windows.
     // The empty first argument is required so Windows doesn't treat the path as the window title.
