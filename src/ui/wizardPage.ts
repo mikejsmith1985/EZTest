@@ -1234,7 +1234,10 @@ export function buildWizardPageHtml(): string {
       }
 
       // Stage: component scan complete — show the count
-      var componentsMatch = logMessage.match(/Found (\d+) component/);
+      // NOTE: All regex escape sequences use double backslash (\\d, \\s, \\/) because
+      // this JS lives inside a TypeScript template literal — single backslashes are
+      // consumed by the template literal parser before the string reaches the browser.
+      var componentsMatch = logMessage.match(/Found (\\d+) component/);
       if (componentsMatch) {
         updateRunProgress(22, 'Found ' + componentsMatch[1] + ' components — building flow map…');
         return;
@@ -1248,7 +1251,7 @@ export function buildWizardPageHtml(): string {
 
       // Flow-mapping batch progress — "batch N/M" appears in both normal and error log lines.
       // Maps batch N of M to the 25%–60% range.
-      var batchMatch = logMessage.match(/batch\s+(\d+)\/(\d+)/i);
+      var batchMatch = logMessage.match(/batch\\s+(\\d+)\\/(\\d+)/i);
       if (batchMatch) {
         var batchCurrent = parseInt(batchMatch[1], 10);
         var batchTotal   = parseInt(batchMatch[2], 10);
@@ -1258,7 +1261,7 @@ export function buildWizardPageHtml(): string {
       }
 
       // Stage: all flows identified
-      var flowsMatch = logMessage.match(/Identified (\d+) user flow/);
+      var flowsMatch = logMessage.match(/Identified (\\d+) user flow/);
       if (flowsMatch) {
         updateRunProgress(60, 'Identified ' + flowsMatch[1] + ' user flows — generating tests…');
         return;
@@ -1272,7 +1275,7 @@ export function buildWizardPageHtml(): string {
 
       // Per-test progress — "Writing test N/M: flow name" emitted by testGenerator.ts.
       // Maps test N of M to the 63%–95% range.
-      var testMatch = logMessage.match(/Writing test\s+(\d+)\/(\d+)/);
+      var testMatch = logMessage.match(/Writing test\\s+(\\d+)\\/(\\d+)/);
       if (testMatch) {
         var testCurrent = parseInt(testMatch[1], 10);
         var testTotal   = parseInt(testMatch[2], 10);
@@ -1283,7 +1286,7 @@ export function buildWizardPageHtml(): string {
 
       // Rate-limit retry — start a live countdown so the user knows it's not frozen.
       // The "Retrying in Xs" text is emitted by aiClient.ts's executeWithRetry().
-      var retryMatch = logMessage.match(/Retrying in (\d+)s/);
+      var retryMatch = logMessage.match(/Retrying in (\\d+)s/);
       if (retryMatch) {
         var waitSeconds  = parseInt(retryMatch[1], 10);
         var currentLabel = document.getElementById('run-progress-label').textContent
