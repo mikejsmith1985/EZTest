@@ -1078,19 +1078,21 @@ export function buildWizardPageHtml(): string {
      */
     function handleRunTestsFromCard() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
-      // Normalize Windows backslashes to forward slashes — Playwright accepts both
-      // on Windows, but a mixed-separator path (C:\Foo/tests/) causes "No tests found".
-      var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
-      var outputDir    = normalizedProjectPath + '/tests/';
       var projectRoot  = appConfig.projectPath;
       lastTestRunWorkingDir = projectRoot;
+
+      // Use a relative path for the Playwright test directory argument.
+      // Playwright on Windows treats absolute paths as regex patterns (not directory
+      // paths), so C:/Foo/tests/ finds nothing.  Since workingDir is already the
+      // project root, './tests' resolves correctly from that directory.
+      var relativeTestsDir = './tests';
 
       // Reveal "Open last report" link immediately so it persists even after the modal closes
       document.getElementById('btn-open-last-report').style.display = 'block';
 
       startRun(
         'Running tests\u2026',
-        { workflow: 'run-tests', output: outputDir, workingDir: projectRoot },
+        { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot },
       );
     }
 
