@@ -28,6 +28,10 @@ export interface EZTestConfig {
   isVerboseLogging: boolean;
   /** Forge Terminal webhook URL for agent feedback loop integration */
   forgeTerminalWebhookUrl?: string;
+  /** Forge Terminal MCP server URL (preferred over webhook when set) */
+  forgeMcpUrl?: string;
+  /** Bearer token for the Forge Terminal MCP server (from ~/.forge/mcp-token) */
+  forgeMcpToken?: string;
 }
 
 /** AI provider configuration. */
@@ -264,6 +268,11 @@ export function loadConfig(workingDirectory: string = process.cwd()): EZTestConf
       // Environment variables always win over config file for AI settings
       ...environmentAiOverrides,
     },
+    // MCP config: environment variables override config file values.
+    forgeMcpUrl: process.env['EZTEST_FORGE_MCP_URL'] ?? fileOverrides.forgeMcpUrl,
+    forgeMcpToken: process.env['EZTEST_FORGE_MCP_TOKEN'] ?? fileOverrides.forgeMcpToken,
+    forgeTerminalWebhookUrl:
+      process.env['EZTEST_FORGE_WEBHOOK_URL'] ?? fileOverrides.forgeTerminalWebhookUrl,
   };
 
   // Validate that we have an API key before any AI operation is attempted
