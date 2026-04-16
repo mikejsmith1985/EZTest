@@ -27,8 +27,9 @@ import { registerFeedbackCommand }  from './commands/feedback.js';
 import { registerRecordCommand }    from './commands/record.js';
 import { registerReplayCommand }    from './commands/replay.js';
 import { registerUiCommand }        from './commands/ui.js';
+import { registerMcpCommand }       from './commands/mcp.js';
 
-const EZTEST_VERSION = '0.1.0';
+const EZTEST_VERSION = '0.1.2';
 
 const cliProgram = new Command();
 
@@ -50,6 +51,7 @@ registerFeedbackCommand(cliProgram);
 registerRecordCommand(cliProgram);
 registerReplayCommand(cliProgram);
 registerUiCommand(cliProgram);
+registerMcpCommand(cliProgram);
 
 // Handle unrecognized commands gracefully
 cliProgram.on('command:*', () => {

@@ -6,7 +6,11 @@
  * edge cases (invalid JSON, empty arrays) are handled gracefully.
  */
 import { test, expect } from '@playwright/test';
-import { mapComponentAnalysesToUserFlows } from '../../src/synthesizer/flowMapper.js';
+import {
+  mapComponentAnalysesToUserFlows,
+  estimateComponentOutputTokens,
+  splitIntoDynamicBatches,
+} from '../../src/synthesizer/flowMapper.js';
 import type { ComponentAnalysis } from '../../src/shared/types.js';
 import type { AiClient } from '../../src/shared/aiClient.js';
 
@@ -16,20 +20,32 @@ function createMockComponentAnalysis(
   componentName: string,
   routePath?: string,
 ): ComponentAnalysis {
+  return createMockComponentWithElements(componentName, 1, routePath);
+}
+
+/**
+ * Creates a mock ComponentAnalysis with a specified number of interactive elements.
+ * Used to test dynamic batch sizing, which depends on element count.
+ */
+function createMockComponentWithElements(
+  componentName: string,
+  elementCount: number,
+  routePath?: string,
+): ComponentAnalysis {
+  const interactiveElements = Array.from({ length: elementCount }, (_, elementIndex) => ({
+    elementKind: 'button' as const,
+    textContent: `Action ${elementIndex + 1}`,
+    handlerName: `handleAction${elementIndex + 1}`,
+  }));
+
   return {
     filePath: `/src/components/${componentName}.tsx`,
     componentName,
-    interactiveElements: [
-      {
-        elementKind: 'button',
-        textContent: 'Submit Order',
-        handlerName: 'handleSubmit',
-      },
-    ],
+    interactiveElements,
     routePath,
     importedComponents: [],
-    detectedFramework: 'react',
-    sourceCode: `export function ${componentName}() { return <button onClick={handleSubmit}>Submit Order</button>; }`,
+    detectedFramework: 'react' as const,
+    sourceCode: `export function ${componentName}() { return <div />; }`,
   };
 }
 
@@ -138,6 +154,35 @@ test.describe('mapComponentAnalysesToUserFlows', () => {
     expect(userFlows[0].startingUrl).toBe('http://localhost:3000/checkout');
   });
 
+  test('preserves an absolute starting URL returned by the AI', async () => {
+    const forgeFlowResponse = JSON.stringify([
+      {
+        flowName: 'User opens the Forge app',
+        startingRoute: 'https://mikejsmith1985.atlassian.net/jira/software/projects/ACRP/apps/example',
+        flowKind: 'happy-path',
+        steps: [
+          {
+            stepDescription: 'Open the Jira project page',
+            targetElementDescription: 'Reports tab',
+            expectedOutcome: 'Forge app loads',
+            isNavigation: true,
+          },
+        ],
+        involvedComponents: ['ReportsHub'],
+        testPriority: 'critical',
+      },
+    ]);
+    const mockAiClient = createMockAiClient(forgeFlowResponse);
+    const components = [createMockComponentAnalysis('ReportsHub')];
+
+    const userFlows = await mapComponentAnalysesToUserFlows(components, mockAiClient, {
+      targetAppUrl: 'https://mikejsmith1985.atlassian.net',
+      shouldAnalyzeIndividualComponents: false,
+    });
+
+    expect(userFlows[0].startingUrl).toBe('https://mikejsmith1985.atlassian.net/jira/software/projects/ACRP/apps/example');
+  });
+
   test('preserves flow kind from AI response (happy-path, error-case, edge-case)', async () => {
     const mockAiClient = createMockAiClient(SAMPLE_FLOW_GENERATION_RESPONSE);
     const components = [createMockComponentAnalysis('CheckoutForm')];
@@ -196,5 +241,106 @@ test.describe('mapComponentAnalysesToUserFlows', () => {
 
     // Should still parse correctly despite the fences
     expect(userFlows.length).toBeGreaterThan(0);
+  });
+});
+
+// ── estimateComponentOutputTokens ─────────────────────────────────────────
+
+test.describe('estimateComponentOutputTokens', () => {
+  test('returns at least 660 tokens for a component with 0 elements (1 logical flow minimum)', () => {
+    const component = createMockComponentWithElements('Empty', 0);
+    // 1 logical flow × 3 variants × 220 tokens = 660
+    expect(estimateComponentOutputTokens(component)).toBe(660);
+  });
+
+  test('returns 660 tokens for a component with 1 element', () => {
+    const component = createMockComponentWithElements('SingleButton', 1);
+    // ceil(1/2) = 1 logical flow × 3 × 220 = 660
+    expect(estimateComponentOutputTokens(component)).toBe(660);
+  });
+
+  test('returns 1320 tokens for a component with 3 elements', () => {
+    const component = createMockComponentWithElements('SmallForm', 3);
+    // ceil(3/2) = 2 logical flows × 3 × 220 = 1320
+    expect(estimateComponentOutputTokens(component)).toBe(1320);
+  });
+
+  test('returns proportionally more tokens for more elements', () => {
+    const simpleComponent = createMockComponentWithElements('Simple', 1);
+    const complexComponent = createMockComponentWithElements('Complex', 10);
+    expect(estimateComponentOutputTokens(complexComponent)).toBeGreaterThan(
+      estimateComponentOutputTokens(simpleComponent),
+    );
+  });
+});
+
+// ── splitIntoDynamicBatches ────────────────────────────────────────────────
+
+test.describe('splitIntoDynamicBatches', () => {
+  test('returns a single batch when total estimated tokens fit within the budget', () => {
+    // 4 simple components × 660 tokens each = 2640 + 200 overhead = 2840 — fits in 3600
+    const components = Array.from({ length: 4 }, (_, i) =>
+      createMockComponentWithElements(`Component${i}`, 1),
+    );
+    const batches = splitIntoDynamicBatches(components);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(4);
+  });
+
+  test('splits into multiple batches when components exceed the token budget', () => {
+    // 6 complex components × ceil(8/2)*3*220 = 6 × 2640 = 15840 tokens — needs multiple batches
+    const components = Array.from({ length: 6 }, (_, i) =>
+      createMockComponentWithElements(`BigForm${i}`, 8),
+    );
+    const batches = splitIntoDynamicBatches(components);
+    expect(batches.length).toBeGreaterThan(1);
+    // Every component must appear in exactly one batch
+    expect(batches.flat()).toHaveLength(6);
+  });
+
+  test('places a single oversized component in its own batch rather than dropping it', () => {
+    // One massive component that alone exceeds the budget
+    const hugeComponent = createMockComponentWithElements('MegaForm', 30);
+    const batches = splitIntoDynamicBatches([hugeComponent]);
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toHaveLength(1);
+  });
+
+  test('returns an empty array for an empty input', () => {
+    expect(splitIntoDynamicBatches([])).toEqual([]);
+  });
+
+  test('preserves component order across batches', () => {
+    const components = Array.from({ length: 8 }, (_, i) =>
+      createMockComponentWithElements(`Form${i}`, 6),
+    );
+    const batches = splitIntoDynamicBatches(components);
+    const allInOrder = batches.flat().map(component => component.componentName);
+    const expectedOrder = components.map(component => component.componentName);
+    expect(allInOrder).toEqual(expectedOrder);
+  });
+
+  test('no batch exceeds TARGET_BATCH_OUTPUT_TOKENS unless a single component forces it', () => {
+    // Mix of simple and complex components
+    const components = [
+      createMockComponentWithElements('Nav', 1),
+      createMockComponentWithElements('LoginForm', 6),
+      createMockComponentWithElements('Dashboard', 2),
+      createMockComponentWithElements('ProfileForm', 8),
+      createMockComponentWithElements('Footer', 1),
+    ];
+    const batches = splitIntoDynamicBatches(components);
+    const TOKEN_BUDGET = 3600;
+    const OVERHEAD = 200;
+    for (const batch of batches) {
+      const batchTokens = batch.reduce(
+        (total, component) => total + estimateComponentOutputTokens(component),
+        OVERHEAD,
+      );
+      // Either within budget, or it's a single component that alone exceeded the budget
+      const isWithinBudget = batchTokens <= TOKEN_BUDGET;
+      const isForcedSingleComponent = batch.length === 1;
+      expect(isWithinBudget || isForcedSingleComponent).toBe(true);
+    }
   });
 });

@@ -9,6 +9,8 @@
  * All dynamic JS values must use string concatenation instead.
  */
 
+import { resolve } from 'node:path';
+
 // ── Color palette ────────────────────────────────────────────────────────────
 
 const COLOR_BG       = '#0d1117';
@@ -22,10 +24,58 @@ const COLOR_PRIMARY  = '#e6edf3';
 const COLOR_MUTED    = '#8b949e';
 
 /**
+ * Builds copy-ready MCP setup presets that already include the local Node.js
+ * executable and the compiled EZTest MCP entry point for this machine.
+ */
+function buildMcpSetupPresets(): Record<string, {
+  title: string;
+  destination: string;
+  searchHint: string;
+  snippet: string;
+}> {
+  const nodeExecutablePath = process.execPath;
+  const mcpEntryPointPath = resolve(process.cwd(), 'dist', 'mcp', 'index.js');
+
+  const stdioCommand = {
+    command: nodeExecutablePath,
+    args:    [mcpEntryPointPath],
+  };
+
+  return {
+    vscode: {
+      title:       'VS Code',
+      destination: '.vscode/mcp.json',
+      searchHint:  'Open your project in VS Code, then paste this into .vscode/mcp.json.',
+      snippet:     JSON.stringify({ servers: { eztest: { type: 'stdio', ...stdioCommand } } }, null, 2),
+    },
+    cursor: {
+      title:       'Cursor',
+      destination: '~/.cursor/mcp.json',
+      searchHint:  'Paste this into your Cursor MCP config file, then save.',
+      snippet:     JSON.stringify({ mcpServers: { eztest: stdioCommand } }, null, 2),
+    },
+    windsurf: {
+      title:       'Windsurf',
+      destination: '~/.windsurf/mcp.json',
+      searchHint:  'Paste this into your Windsurf MCP config file, then save.',
+      snippet:     JSON.stringify({ mcpServers: { eztest: stdioCommand } }, null, 2),
+    },
+    claude: {
+      title:       'Claude Code',
+      destination: 'Claude Code terminal',
+      searchHint:  'Paste this command into Claude Code once, then press Enter.',
+      snippet:     'claude mcp add eztest -- "' + nodeExecutablePath + '" "' + mcpEntryPointPath + '"',
+    },
+  };
+}
+
+/**
  * Returns the full HTML document for the EZTest application as a string.
  * The page is entirely self-contained — all CSS and JavaScript are inlined.
  */
 export function buildWizardPageHtml(): string {
+  const mcpSetupPresetsJson = JSON.stringify(buildMcpSetupPresets());
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -366,6 +416,7 @@ export function buildWizardPageHtml(): string {
       max-width: 460px;
       width: 100%;
     }
+    .config-card.is-wide { max-width: 760px; }
     .config-card-title { font-size: 1.1rem; font-weight: 700; margin-bottom: 6px; }
     .config-card-desc { font-size: 0.87rem; color: ${COLOR_MUTED}; line-height: 1.55; margin-bottom: 22px; }
     .config-input-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
@@ -396,6 +447,97 @@ export function buildWizardPageHtml(): string {
     .config-btn-row { display: flex; gap: 10px; margin-top: 20px; }
     .config-btn-row .btn-primary { flex: 1; }
     .config-btn-row .btn-ghost { width: auto; }
+    .mcp-step-list {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+    }
+    .mcp-step-card {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 10px;
+      padding: 12px 14px;
+    }
+    .mcp-step-number {
+      width: 24px;
+      height: 24px;
+      border-radius: 999px;
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+    .mcp-step-title { font-size: 0.9rem; font-weight: 700; margin-bottom: 3px; }
+    .mcp-step-body { font-size: 0.82rem; color: ${COLOR_MUTED}; line-height: 1.5; }
+    .mcp-preset-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .mcp-preset-btn {
+      background: #21262d;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_PRIMARY};
+      border-radius: 999px;
+      padding: 9px 14px;
+      font-size: 0.84rem;
+      cursor: pointer;
+    }
+    .mcp-preset-btn.is-active {
+      background: ${COLOR_ACCENT}22;
+      border-color: ${COLOR_ACCENT};
+      color: #fff;
+    }
+    .mcp-destination-box {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px;
+      color: ${COLOR_PRIMARY};
+      padding: 10px 12px;
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+    .mcp-search-hint {
+      margin-top: 6px;
+      font-size: 0.78rem;
+      color: ${COLOR_MUTED};
+      line-height: 1.5;
+    }
+    .mcp-snippet-box {
+      background: ${COLOR_BG};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px;
+      color: ${COLOR_PRIMARY};
+      padding: 14px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 240px;
+      overflow: auto;
+    }
+    .mcp-copy-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .mcp-copy-row .btn-primary { width: auto; padding: 10px 18px; }
+    .mcp-copy-status {
+      font-size: 0.8rem;
+      color: ${COLOR_MUTED};
+      line-height: 1.5;
+    }
 
     /* ── Run output modal ── */
     .run-modal {
@@ -437,6 +579,32 @@ export function buildWizardPageHtml(): string {
       cursor: pointer;
     }
     .run-modal-cancel-btn:hover { border-color: ${COLOR_ERROR}; color: ${COLOR_ERROR}; }
+    /* ── Progress bar (shown between header and terminal during active runs) ── */
+    .run-progress-section {
+      padding: 12px 20px 10px;
+      border-bottom: 1px solid ${COLOR_BORDER};
+      flex-shrink: 0;
+    }
+    .run-progress-bar-track {
+      height: 4px;
+      background: ${COLOR_BORDER};
+      border-radius: 3px;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .run-progress-bar-fill {
+      height: 100%;
+      background: ${COLOR_ACCENT};
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.5s ease;
+    }
+    .run-progress-bar-fill.is-done { background: ${COLOR_SUCCESS}; }
+    .run-progress-label {
+      font-size: 0.75rem;
+      color: ${COLOR_MUTED};
+      letter-spacing: 0.01em;
+    }
     .run-terminal {
       flex: 1;
       overflow-y: auto;
@@ -464,6 +632,26 @@ export function buildWizardPageHtml(): string {
     .run-result-success { color: ${COLOR_SUCCESS}; font-weight: 600; font-size: 0.9rem; }
     .run-result-failure { color: ${COLOR_ERROR};   font-weight: 600; font-size: 0.9rem; }
     .run-result-warning { color: ${COLOR_WARNING}; font-weight: 600; font-size: 0.9rem; }
+    /* Action buttons shown in the done bar after a run completes */
+    .run-action-btn {
+      background: ${COLOR_ACCENT};
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 14px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .run-action-btn:hover { opacity: 0.88; }
+    .run-action-btn.is-secondary {
+      background: transparent;
+      border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_MUTED};
+    }
+    .run-action-btn.is-secondary:hover { border-color: ${COLOR_ACCENT}; color: ${COLOR_ACCENT}; }
+    .run-done-actions { display: flex; gap: 8px; align-items: center; }
     .spinner {
       width: 18px; height: 18px;
       border: 2px solid ${COLOR_BORDER};
@@ -540,6 +728,15 @@ export function buildWizardPageHtml(): string {
        ───────────────────────────────────────────────────────────────────── -->
   <div id="app" style="display:none">
 
+    <!-- Update banner — shown only when a newer EZTest version is available.
+         Lives outside the app-bar so it spans the full width above everything. -->
+    <div id="update-banner" style="display:none; background: linear-gradient(90deg, #1e1b4b 0%, #312e81 100%); border-bottom: 1px solid #4f46e5; padding: 10px 20px; display: none; align-items: center; gap: 12px; font-size: 0.88rem;">
+      <span style="font-size: 1.1em;">&#x1F680;</span>
+      <span id="update-banner-text" style="flex:1; color: #c7d2fe;">EZTest update available</span>
+      <button id="update-install-btn" style="background: #4f46e5; color: #fff; border: none; border-radius: 6px; padding: 6px 16px; font-size: 0.85rem; font-weight: 600; cursor: pointer;">Update Now</button>
+      <button id="update-dismiss-btn" style="background: transparent; color: #818cf8; border: 1px solid #312e81; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer;">Later</button>
+    </div>
+
     <!-- App bar -->
     <div class="app-bar">
       <div class="app-bar-brand">&#x26A1; EZ<span>Test</span></div>
@@ -610,6 +807,36 @@ export function buildWizardPageHtml(): string {
           <button class="action-btn" id="btn-fix">Fix &amp; Validate &#8594;</button>
         </div>
 
+        <!-- Card 4: Run Tests -->
+        <div class="action-card">
+          <div class="action-icon">&#9654;&#xFE0F;</div>
+          <div class="action-title">Run Your Tests</div>
+          <div class="action-description">
+            Execute the Playwright tests that have already been generated for your project.
+            Results stream live so you can see exactly what passed, what failed, and why —
+            then open the full HTML report in one click.
+          </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Verifying your app after a code change without re-generating tests.
+          </div>
+          <button class="action-btn" id="btn-run-tests">Run Tests &#8594;</button>
+          <div class="action-secondary-link" id="btn-open-last-report" style="display:none">Open last report</div>
+        </div>
+
+        <!-- Card 5: MCP Setup -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F9E9;</div>
+          <div class="action-title">Set Up EZTest In My IDE</div>
+          <div class="action-description">
+            Want EZTest inside VS Code, Cursor, Windsurf, or Claude Code?
+            We give you the exact setup to copy for this computer — already filled in.
+          </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> Using EZTest from your IDE without touching the terminal.
+          </div>
+          <button class="action-btn" id="btn-mcp-setup">Open MCP Setup &#8594;</button>
+        </div>
+
       </div>
     </div>
   </div>
@@ -644,10 +871,44 @@ export function buildWizardPageHtml(): string {
         </span>
         <button class="run-modal-cancel-btn" id="run-cancel-btn">Cancel</button>
       </div>
+      <!-- Progress bar: driven by log message parsing — no separate protocol needed -->
+      <div class="run-progress-section" id="run-progress-section" style="display:none">
+        <div class="run-progress-bar-track">
+          <div class="run-progress-bar-fill" id="run-progress-bar"></div>
+        </div>
+        <div class="run-progress-label" id="run-progress-label">Starting…</div>
+      </div>
       <div class="run-terminal" id="run-terminal"></div>
       <div class="run-done-bar" id="run-done-bar" style="display:none">
         <span id="run-done-msg"></span>
-        <button class="btn-ghost" onclick="closeRunModal()">Close</button>
+        <div class="run-done-actions">
+          <!-- Shown after a successful generate run -->
+          <button class="run-action-btn" id="run-tests-btn"   style="display:none" onclick="startRunTests()">&#9654; Run Tests</button>
+          <!-- Shown after a successful test run -->
+          <button class="run-action-btn is-secondary" id="open-report-btn" style="display:none" onclick="openPlaywrightReport()">&#128202; Open Report</button>
+          <button class="btn-ghost" onclick="closeRunModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Update modal — shown when the user clicks "Update Now" in the banner ──
+       Separate from the run modal so update output never interferes with
+       normal workflow logs. -->
+  <div class="run-modal-backdrop" id="update-modal-backdrop" style="display:none">
+    <div class="run-modal" style="max-width: 680px; width: 95%">
+      <div class="run-modal-header">
+        <span class="run-modal-title" id="update-modal-title">&#x1F680; Updating EZTest</span>
+        <span id="update-modal-spinner" class="run-status-running">
+          <span class="spinner"></span>Working...
+        </span>
+      </div>
+      <div class="run-terminal" id="update-terminal" style="height: 340px; min-height: 200px;"></div>
+      <div class="run-done-bar" id="update-done-bar" style="display:none">
+        <span id="update-done-msg"></span>
+        <div class="run-done-actions">
+          <button class="btn-ghost" onclick="closeUpdateModal()">Close</button>
+        </div>
       </div>
     </div>
   </div>
@@ -662,6 +923,31 @@ export function buildWizardPageHtml(): string {
     var scanResult  = null;   // scanned project info
     var isRunning   = false;
     var socket      = io();
+    /** Interval handle for the rate-limit retry countdown — cleared on resume or cancel. */
+    var progressRetryCountdown = null;
+    /** Total test files to generate, extracted from "Generating Playwright tests for N" log line. */
+    var progressTotalTests = 0;
+    /** Running count of confirmed-written test files, incremented on each "Written:" log line. */
+    var progressTestsWritten = 0;
+    /**
+     * The last successfully completed generate run config.
+     * Retained so the "Run Tests" button knows which output dir and project root to use.
+     */
+    var lastGenerateRunConfig = null;
+    /**
+     * The project root used for the most recent test run.
+     * Passed to /api/open-report so it can locate playwright-report/index.html.
+     */
+    var lastTestRunWorkingDir = null;
+    /**
+     * The run config for the currently active (or most recently started) run.
+     * Used in run:done to decide which action buttons to show.
+     */
+    var currentRunConfig = null;
+    /** Copy-ready MCP setup presets for supported IDEs. */
+    var mcpSetupPresets = ${mcpSetupPresetsJson};
+    /** The preset currently selected in the MCP setup helper. */
+    var activeMcpPresetKey = 'vscode';
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 
@@ -828,6 +1114,59 @@ export function buildWizardPageHtml(): string {
         document.getElementById('project-pill-name').textContent = escapeHtml(scanResult.projectName);
         document.getElementById('project-pill-name').className   = 'project-pill-name';
       }
+
+      // Silently check for updates in the background each time the dashboard opens.
+      // The banner is only shown if a newer version is found — never on error.
+      checkForUpdates();
+    }
+
+    /**
+     * Calls the /api/update/check endpoint and shows the update banner
+     * if the GitHub releases API reports a newer version is available.
+     * Failures are swallowed silently — update checks should never disrupt the UI.
+     */
+    function checkForUpdates() {
+      fetch('/api/update/check')
+        .then(function(r) { return r.json(); })
+        .then(function(updateResult) {
+          if (updateResult.hasUpdate) {
+            showUpdateBanner(updateResult.latestVersion);
+          }
+        })
+        .catch(function() {
+          // Intentionally silent — no network or GitHub API access is not an error.
+        });
+    }
+
+    /**
+     * Shows the update-available banner above the app bar with the new version number.
+     * The banner stays visible until the user clicks "Update Now" or "Later".
+     */
+    function showUpdateBanner(latestVersion) {
+      var bannerEl  = document.getElementById('update-banner');
+      var bannerText = document.getElementById('update-banner-text');
+      bannerText.innerHTML = 'EZTest <strong>v' + escapeHtml(latestVersion) + '</strong> is available \u2014 you\'re running an older version.';
+      bannerEl.style.display = 'flex';
+    }
+
+    /** Hides the update banner without installing. */
+    function dismissUpdateBanner() {
+      document.getElementById('update-banner').style.display = 'none';
+    }
+
+    /** Opens the update modal and downloads the next portable bundle in the background. */
+    function openUpdateModal() {
+      dismissUpdateBanner();
+      document.getElementById('update-modal-backdrop').style.display = 'flex';
+      document.getElementById('update-terminal').innerHTML = '';
+      document.getElementById('update-done-bar').style.display = 'none';
+      document.getElementById('update-modal-spinner').style.display = '';
+      socket.emit('update:install');
+    }
+
+    /** Closes the update modal. */
+    function closeUpdateModal() {
+      document.getElementById('update-modal-backdrop').style.display = 'none';
     }
 
     /** Renders the stats bar at the top of the dashboard. */
@@ -859,14 +1198,66 @@ export function buildWizardPageHtml(): string {
     // ── Action card handlers ───────────────────────────────────────────────────
 
     /**
-     * Runs the AI test generation workflow immediately using the
-     * scanned source directory as input — no additional config needed.
+     * Prompts for the app URL when EZTest needs a real browser entry point.
+     * Without this, generated tests fall back to guesses like localhost or
+     * relative paths that cannot be opened by Playwright.
+     */
+    function ensureAppUrlBeforeContinuing(runButtonLabel, onUrlReady) {
+      if (appConfig && appConfig.appUrl && appConfig.appUrl.trim()) {
+        onUrlReady(appConfig.appUrl.trim());
+        return;
+      }
+
+      openConfigOverlay(
+        'Tell EZTest where your app opens',
+        'EZTest needs the real page URL before it can generate or run browser tests. Paste the full URL a user opens in the browser. For Jira Forge apps, use the full Atlassian page URL — not just /jira/...',
+        function(container) {
+          container.innerHTML =
+            '<div class="config-input-row">'
+            + '<label>Your app URL</label>'
+            + '<div class="config-input-wrap">'
+            + '<input class="config-input" type="url" id="cfg-required-app-url" placeholder="https://example.com/app" value="' + escapeAttr((appConfig && appConfig.appUrl) || '') + '" />'
+            + '</div>'
+            + '</div>';
+        },
+        function() {
+          var configuredAppUrl = document.getElementById('cfg-required-app-url').value.trim();
+          if (!configuredAppUrl) {
+            document.getElementById('cfg-required-app-url').focus();
+            return false;
+          }
+          fetch('/api/app-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ appUrl: configuredAppUrl })
+          });
+          appConfig.appUrl = configuredAppUrl;
+          onUrlReady(configuredAppUrl);
+          return true;
+        },
+        { runButtonLabel: runButtonLabel },
+      );
+    }
+
+    /**
+     * Runs the AI test generation workflow using the scanned source directory.
+     * A real app URL is required so EZTest does not generate broken browser navigation.
      */
     function handleGenerateTests() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
       var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
-      var outputDir = appConfig.projectPath + '/tests/';
-      startRun('Generating tests\u2026', { workflow: 'generate', source: sourceDir, output: outputDir });
+      // Normalize Windows backslashes so the path separator is consistent before
+      // appending the sub-directory — mixed slashes confuse Playwright's file glob.
+      var normalizedProjectPath = appConfig.projectPath.replace(/\\\\/g, '/');
+      var outputDir = normalizedProjectPath + '/tests/';
+      ensureAppUrlBeforeContinuing('Save & Generate', function(configuredAppUrl) {
+        startRun('Generating tests\u2026', {
+          workflow: 'generate',
+          source: sourceDir,
+          output: outputDir,
+          url: configuredAppUrl,
+        });
+      });
     }
 
     /**
@@ -876,7 +1267,14 @@ export function buildWizardPageHtml(): string {
     function handlePreviewPlan() {
       if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
       var sourceDir = scanResult ? scanResult.sourceDirectory : appConfig.projectPath;
-      startRun('Previewing test plan\u2026', { workflow: 'generate', source: sourceDir, dryRun: true });
+      ensureAppUrlBeforeContinuing('Save & Preview', function(configuredAppUrl) {
+        startRun('Previewing test plan\u2026', {
+          workflow: 'generate',
+          source: sourceDir,
+          url: configuredAppUrl,
+          dryRun: true,
+        });
+      });
     }
 
     /**
@@ -972,6 +1370,125 @@ export function buildWizardPageHtml(): string {
       );
     }
 
+    /**
+     * Runs the Playwright tests that already exist in the project's tests/ directory.
+     * This is the persistent entry point on the main page — no re-generation needed.
+     * After the run, the "Open last report" link becomes available on the same card.
+     */
+    function handleRunTestsFromCard() {
+      if (!appConfig || !appConfig.projectPath) { showOnboarding(1); return; }
+      var projectRoot  = appConfig.projectPath;
+      lastTestRunWorkingDir = projectRoot;
+
+      // Use a relative path for the Playwright test directory argument.
+      // Playwright on Windows treats absolute paths as regex patterns (not directory
+      // paths), so C:/Foo/tests/ finds nothing.  Since workingDir is already the
+      // project root, './tests' resolves correctly from that directory.
+      var relativeTestsDir = './tests';
+
+      ensureAppUrlBeforeContinuing('Save & Run Tests', function(configuredAppUrl) {
+        // Reveal "Open last report" link immediately so it persists even after the modal closes
+        document.getElementById('btn-open-last-report').style.display = 'block';
+        startRun(
+          'Running tests\u2026',
+          { workflow: 'run-tests', output: relativeTestsDir, workingDir: projectRoot, appUrl: configuredAppUrl },
+        );
+      });
+    }
+
+    /**
+     * Opens a kid-simple MCP setup helper: pick an IDE, copy the ready-made
+     * snippet, paste it where the helper tells you, save, and you're done.
+     */
+    function handleMcpSetup() {
+      openConfigOverlay(
+        'Set Up EZTest In My IDE',
+        'Three easy steps: pick your IDE, click Copy setup, then paste it where EZTest tells you. No command line knowledge required.',
+        renderMcpSetupFields,
+        function() { return true; },
+        { runButtonLabel: 'Done', isWide: true },
+      );
+    }
+
+    /** Builds the MCP helper content inside the shared overlay. */
+    function renderMcpSetupFields(container) {
+      container.innerHTML =
+        '<div class="mcp-step-list">'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">1</div><div><div class="mcp-step-title">Pick your IDE</div><div class="mcp-step-body">Choose the app you use below.</div></div></div>'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">2</div><div><div class="mcp-step-title">Copy the setup</div><div class="mcp-step-body">EZTest already filled in the right Node and EZTest paths for this computer.</div></div></div>'
+        + '<div class="mcp-step-card"><div class="mcp-step-number">3</div><div><div class="mcp-step-title">Paste and save</div><div class="mcp-step-body">Put it in the file shown below, or run the command if you picked Claude Code.</div></div></div>'
+        + '</div>'
+        + '<div class="mcp-preset-row">'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-vscode" onclick="renderSelectedMcpPreset(\'vscode\')">VS Code</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-cursor" onclick="renderSelectedMcpPreset(\'cursor\')">Cursor</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-windsurf" onclick="renderSelectedMcpPreset(\'windsurf\')">Windsurf</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-claude" onclick="renderSelectedMcpPreset(\'claude\')">Claude Code</button>'
+        + '</div>'
+        + '<div class="config-input-row">'
+        + '<label>Paste this into</label>'
+        + '<div class="mcp-destination-box" id="mcp-destination-box"></div>'
+        + '<div class="mcp-search-hint" id="mcp-search-hint"></div>'
+        + '</div>'
+        + '<div class="config-input-row">'
+        + '<label>Copy this setup</label>'
+        + '<pre class="mcp-snippet-box" id="mcp-snippet-box"></pre>'
+        + '</div>'
+        + '<div class="mcp-copy-row">'
+        + '<button type="button" class="btn-primary" onclick="copySelectedMcpPreset()">Copy setup</button>'
+        + '<div class="mcp-copy-status" id="mcp-copy-status">Tip: after you paste it, save the file and restart your IDE if it asks.</div>'
+        + '</div>';
+
+      renderSelectedMcpPreset(activeMcpPresetKey);
+    }
+
+    /** Switches the visible MCP snippet to match the selected IDE. */
+    function renderSelectedMcpPreset(presetKey) {
+      var selectedPreset = mcpSetupPresets[presetKey];
+      if (!selectedPreset) { return; }
+
+      activeMcpPresetKey = presetKey;
+      document.getElementById('mcp-destination-box').textContent = selectedPreset.destination;
+      document.getElementById('mcp-search-hint').textContent = selectedPreset.searchHint;
+      document.getElementById('mcp-snippet-box').textContent = selectedPreset.snippet;
+      document.getElementById('mcp-copy-status').textContent = 'Click Copy setup, then paste this into ' + selectedPreset.destination + '.';
+
+      Object.keys(mcpSetupPresets).forEach(function(availablePresetKey) {
+        var presetButton = document.getElementById('mcp-preset-' + availablePresetKey);
+        if (presetButton) {
+          presetButton.classList.toggle('is-active', availablePresetKey === presetKey);
+        }
+      });
+    }
+
+    /** Copies the selected MCP setup snippet to the clipboard and confirms success. */
+    function copySelectedMcpPreset() {
+      var selectedPreset = mcpSetupPresets[activeMcpPresetKey];
+      if (!selectedPreset) { return; }
+
+      navigator.clipboard.writeText(selectedPreset.snippet).then(function() {
+        document.getElementById('mcp-copy-status').textContent = 'Copied! Now paste it into ' + selectedPreset.destination + '.';
+      }).catch(function() {
+        document.getElementById('mcp-copy-status').textContent = 'Copy failed. You can still select the text and copy it by hand.';
+      });
+    }
+
+    /**
+     * Opens the most recent Playwright HTML report for the currently loaded project.
+     * Works from the main page card any time after at least one test run has completed.
+     */
+    function handleOpenLastReport() {
+      if (!lastTestRunWorkingDir && appConfig) {
+        // Fall back to the current project path if no run has happened this session
+        lastTestRunWorkingDir = appConfig.projectPath;
+      }
+      if (!lastTestRunWorkingDir) { return; }
+      fetch('/api/open-report', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ reportDir: lastTestRunWorkingDir }),
+      }).catch(function() {});
+    }
+
     // ── Config overlay ────────────────────────────────────────────────────────
 
     /** Active "run" callback stored while the config overlay is open. */
@@ -982,9 +1499,16 @@ export function buildWizardPageHtml(): string {
      * and field-builder function. The onRun callback is called when the
      * user clicks "Run" and should return false to cancel (e.g. validation fail).
      */
-    function openConfigOverlay(title, description, buildFields, onRun) {
+    function openConfigOverlay(title, description, buildFields, onRun, overlayOptions) {
+      var normalizedOverlayOptions = overlayOptions || {};
+      var configCardElement = document.querySelector('#config-overlay .config-card');
       document.getElementById('config-overlay-title').textContent = title;
       document.getElementById('config-overlay-desc').textContent  = description;
+      document.getElementById('config-run-btn').textContent = normalizedOverlayOptions.runButtonLabel || 'Run →';
+      document.getElementById('config-cancel-btn').textContent = normalizedOverlayOptions.cancelButtonLabel || 'Cancel';
+      if (configCardElement) {
+        configCardElement.classList.toggle('is-wide', Boolean(normalizedOverlayOptions.isWide));
+      }
       buildFields(document.getElementById('config-overlay-fields'));
       activeConfigRunFn = onRun;
       document.getElementById('config-overlay').style.display = 'flex';
@@ -1005,11 +1529,29 @@ export function buildWizardPageHtml(): string {
       if (isRunning) { return; }
       isRunning = true;
 
+      // Reset progress bar to initial state for every new run
+      var progressBar = document.getElementById('run-progress-bar');
+      progressBar.style.width = '2%';
+      progressBar.classList.remove('is-done');
+      document.getElementById('run-progress-label').textContent  = 'Starting…';
+      document.getElementById('run-progress-section').style.display = 'block';
+      progressTotalTests   = 0;
+      progressTestsWritten = 0;
+      if (progressRetryCountdown) {
+        clearInterval(progressRetryCountdown);
+        progressRetryCountdown = null;
+      }
+
       document.getElementById('run-modal-title').innerHTML = '<span class="spinner"></span>' + escapeHtml(titleText);
       document.getElementById('run-terminal').innerHTML    = '';
-      document.getElementById('run-done-bar').style.display = 'none';
+      document.getElementById('run-done-bar').style.display  = 'none';
+      document.getElementById('run-tests-btn').style.display  = 'none';
+      document.getElementById('open-report-btn').style.display = 'none';
       document.getElementById('run-cancel-btn').style.display = 'block';
       document.getElementById('run-modal').style.display     = 'flex';
+
+      // Track the current run so run:done knows which action buttons to reveal
+      currentRunConfig = runConfig;
 
       socket.emit('run:start', runConfig);
     }
@@ -1023,21 +1565,195 @@ export function buildWizardPageHtml(): string {
       terminal.scrollTop = terminal.scrollHeight;
     }
 
+    /**
+     * Sets the progress bar fill width and the stage label beneath it.
+     * percentComplete is 0–100; stageLabelText is a human-readable description
+     * of what the pipeline is currently doing.
+     */
+    function updateRunProgress(percentComplete, stageLabelText) {
+      var barFill = document.getElementById('run-progress-bar');
+      var label   = document.getElementById('run-progress-label');
+      barFill.style.width   = Math.min(100, percentComplete) + '%';
+      label.textContent     = stageLabelText;
+      if (percentComplete >= 100) {
+        barFill.classList.add('is-done');
+      } else {
+        barFill.classList.remove('is-done');
+      }
+    }
+
+    /**
+     * Shows a live countdown in the progress label when a rate-limit retry
+     * is in progress. Ticks every second so the user knows the run is alive
+     * and exactly how long until it resumes — not just frozen.
+     */
+    function startRetryCountdown(waitSeconds, stageLabel) {
+      if (progressRetryCountdown) { clearInterval(progressRetryCountdown); }
+      var secondsRemaining = waitSeconds;
+      var currentPercent   = parseFloat(document.getElementById('run-progress-bar').style.width) || 0;
+
+      function tickCountdown() {
+        if (secondsRemaining <= 0) {
+          clearInterval(progressRetryCountdown);
+          progressRetryCountdown = null;
+          updateRunProgress(currentPercent, stageLabel);
+          return;
+        }
+        updateRunProgress(
+          currentPercent,
+          stageLabel + ' — rate limited, resuming in ' + secondsRemaining + 's…',
+        );
+        secondsRemaining--;
+      }
+      tickCountdown(); // fire immediately so first second shows right away
+      progressRetryCountdown = setInterval(tickCountdown, 1000);
+    }
+
+    /**
+     * Parses a single log line from the CLI process and advances the progress bar
+     * when the line matches a known pipeline stage or batch/test count marker.
+     *
+     * All progress signals come from text already streamed to the terminal — no
+     * separate protocol or socket event is needed. Patterns must stay in sync with
+     * the log messages emitted by generate.ts, flowMapper.ts, and testGenerator.ts.
+     */
+    function parseProgressFromLog(logMessage) {
+      // Stage: source code analysis begins
+      if (logMessage.includes('Analyzing source code')) {
+        updateRunProgress(10, 'Analyzing source code…');
+        return;
+      }
+
+      // Stage: component scan complete — show the count
+      // NOTE: All regex escape sequences use double backslash (\\d, \\s, \\/) because
+      // this JS lives inside a TypeScript template literal — single backslashes are
+      // consumed by the template literal parser before the string reaches the browser.
+      var componentsMatch = logMessage.match(/Found (\\d+) component/);
+      if (componentsMatch) {
+        updateRunProgress(22, 'Found ' + componentsMatch[1] + ' components — building flow map…');
+        return;
+      }
+
+      // Stage: flow mapping begins
+      if (logMessage.includes('Mapping components to user flows')) {
+        updateRunProgress(25, 'Mapping components to user flows…');
+        return;
+      }
+
+      // Flow-mapping batch progress — "batch N/M" appears in both normal and error log lines.
+      // Maps batch N of M to the 25%–60% range.
+      var batchMatch = logMessage.match(/batch\\s+(\\d+)\\/(\\d+)/i);
+      if (batchMatch) {
+        var batchCurrent = parseInt(batchMatch[1], 10);
+        var batchTotal   = parseInt(batchMatch[2], 10);
+        var batchPercent = 25 + Math.floor((batchCurrent / batchTotal) * 35);
+        updateRunProgress(batchPercent, 'Mapping flows — batch ' + batchCurrent + ' of ' + batchTotal + '…');
+        return;
+      }
+
+      // Stage: all flows identified
+      var flowsMatch = logMessage.match(/Identified (\\d+) user flow/);
+      if (flowsMatch) {
+        updateRunProgress(60, 'Identified ' + flowsMatch[1] + ' user flows — generating tests…');
+        return;
+      }
+
+      // Stage: test generation begins
+      if (logMessage.includes('Generating Playwright tests for')) {
+        updateRunProgress(63, 'Generating Playwright test files…');
+        return;
+      }
+
+      // Per-test progress — "Writing test N/M: flow name" emitted by testGenerator.ts.
+      // Maps test N of M to the 63%–95% range.
+      var testMatch = logMessage.match(/Writing test\\s+(\\d+)\\/(\\d+)/);
+      if (testMatch) {
+        var testCurrent = parseInt(testMatch[1], 10);
+        var testTotal   = parseInt(testMatch[2], 10);
+        var testPercent = 63 + Math.floor((testCurrent / testTotal) * 32);
+        updateRunProgress(testPercent, 'Writing tests — ' + testCurrent + ' of ' + testTotal + '…');
+        return;
+      }
+
+      // Rate-limit retry — start a live countdown so the user knows it's not frozen.
+      // The "Retrying in Xs" text is emitted by aiClient.ts's executeWithRetry().
+      var retryMatch = logMessage.match(/Retrying in (\\d+)s/);
+      if (retryMatch) {
+        var waitSeconds  = parseInt(retryMatch[1], 10);
+        var currentLabel = document.getElementById('run-progress-label').textContent
+                             .replace(/ — rate limited.*/, ''); // strip any prior countdown
+        startRetryCountdown(waitSeconds, currentLabel);
+        return;
+      }
+
+      // Stage: pipeline finished
+      if (logMessage.includes('Done!')) {
+        if (progressRetryCountdown) {
+          clearInterval(progressRetryCountdown);
+          progressRetryCountdown = null;
+        }
+        updateRunProgress(100, '✅ Done!');
+      }
+    }
+
     function closeRunModal() {
       document.getElementById('run-modal').style.display = 'none';
       isRunning = false;
+    }
+
+    /**
+     * Starts a Playwright test run against the output directory from the last
+     * successful generate run. Uses the project root as the working directory
+     * so Playwright finds its own config and installed browsers.
+     */
+    function startRunTests() {
+      if (!lastGenerateRunConfig) { return; }
+      var projectRoot = appConfig ? appConfig.projectPath : null;
+      lastTestRunWorkingDir = projectRoot;
+      ensureAppUrlBeforeContinuing('Save & Run Tests', function(configuredAppUrl) {
+        startRun(
+          'Running tests\u2026',
+          {
+            workflow:    'run-tests',
+            output:      lastGenerateRunConfig.output,
+            workingDir:  projectRoot || undefined,
+            appUrl:      configuredAppUrl,
+          },
+        );
+      });
+    }
+
+    /**
+     * Sends the last test run's working directory to the server so it can open
+     * the Playwright HTML report (playwright-report/index.html) in the default browser.
+     */
+    function openPlaywrightReport() {
+      if (!lastTestRunWorkingDir) { return; }
+      fetch('/api/open-report', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ reportDir: lastTestRunWorkingDir }),
+      }).catch(function() {
+        // Non-fatal — the button is best-effort; user can open the file manually
+      });
     }
 
     // ── Socket events ─────────────────────────────────────────────────────────
 
     socket.on('run:log', function(data) {
       appendLogLine(data.level, data.message);
+      parseProgressFromLog(data.message);
     });
 
     socket.on('run:done', function(data) {
       isRunning = false;
-      var doneBar  = document.getElementById('run-done-bar');
-      var doneMsg  = document.getElementById('run-done-msg');
+      // Always stop the retry countdown — the run is finished regardless of outcome
+      if (progressRetryCountdown) {
+        clearInterval(progressRetryCountdown);
+        progressRetryCountdown = null;
+      }
+      var doneBar   = document.getElementById('run-done-bar');
+      var doneMsg   = document.getElementById('run-done-msg');
       var cancelBtn = document.getElementById('run-cancel-btn');
 
       doneBar.style.display        = 'flex';
@@ -1045,14 +1761,68 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-modal-title').textContent = 'Run complete';
 
       if (data.exitCode === 0) {
+        updateRunProgress(100, '\u2705 All done!');
         doneMsg.className   = 'run-result-success';
         doneMsg.textContent = '\u2705 Completed successfully';
+
+        // After a successful generate, offer to run the tests immediately
+        if (currentRunConfig && currentRunConfig.workflow === 'generate') {
+          lastGenerateRunConfig = currentRunConfig;
+          document.getElementById('run-tests-btn').style.display = 'inline-block';
+        }
+        // After a successful test run, offer to open the HTML report (in modal and on main card)
+        if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
+          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          document.getElementById('open-report-btn').style.display = 'inline-block';
+          document.getElementById('btn-open-last-report').style.display = 'block';
+        }
       } else if (data.exitCode === 130) {
+        updateRunProgress(
+          parseFloat(document.getElementById('run-progress-bar').style.width) || 0,
+          'Cancelled',
+        );
         doneMsg.className   = 'run-result-warning';
         doneMsg.textContent = 'Cancelled';
       } else {
         doneMsg.className   = 'run-result-failure';
         doneMsg.textContent = '\u274C Finished with errors (exit code ' + data.exitCode + ')';
+        // Even on failure, offer report — partial results are still useful
+        if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
+          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          document.getElementById('open-report-btn').style.display = 'inline-block';
+          document.getElementById('btn-open-last-report').style.display = 'block';
+        }
+      }
+    });
+
+    // ── Update socket events ─────────────────────────────────────────────────
+
+    // Streams a single line of update output into the update modal terminal.
+    socket.on('update:log', function(data) {
+      var terminal = document.getElementById('update-terminal');
+      if (!terminal) return;
+      var line = document.createElement('div');
+      line.style.cssText = 'font-family: monospace; font-size: 0.82rem; color: #c9d1d9; padding: 1px 0; white-space: pre-wrap; word-break: break-all;';
+      line.textContent = data.message;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    });
+
+    // Called when the portable bundle download finishes (success or failure).
+    socket.on('update:complete', function(data) {
+      var spinnerEl = document.getElementById('update-modal-spinner');
+      var doneBar   = document.getElementById('update-done-bar');
+      var doneMsg   = document.getElementById('update-done-msg');
+      if (spinnerEl) spinnerEl.style.display = 'none';
+      if (doneBar)   doneBar.style.display   = 'flex';
+      if (doneMsg) {
+        if (data.success) {
+          doneMsg.className   = 'run-result-success';
+          doneMsg.textContent = data.message || '\u2705 Update downloaded. Restart EZTest to apply it.';
+        } else {
+          doneMsg.className   = 'run-result-failure';
+          doneMsg.textContent = data.message || '\u274C Update failed — see log above.';
+        }
       }
     });
 
@@ -1095,6 +1865,9 @@ export function buildWizardPageHtml(): string {
       document.getElementById('btn-preview-plan').addEventListener('click', handlePreviewPlan);
       document.getElementById('btn-record').addEventListener('click', handleRecord);
       document.getElementById('btn-fix').addEventListener('click', handleFixTest);
+      document.getElementById('btn-run-tests').addEventListener('click', handleRunTestsFromCard);
+      document.getElementById('btn-mcp-setup').addEventListener('click', handleMcpSetup);
+      document.getElementById('btn-open-last-report').addEventListener('click', handleOpenLastReport);
 
       // Config overlay
       document.getElementById('config-cancel-btn').addEventListener('click', closeConfigOverlay);
@@ -1109,6 +1882,10 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-cancel-btn').addEventListener('click', function() {
         socket.emit('run:cancel');
       });
+
+      // Update banner buttons
+      document.getElementById('update-install-btn').addEventListener('click', openUpdateModal);
+      document.getElementById('update-dismiss-btn').addEventListener('click', dismissUpdateBanner);
 
       // Boot the app
       initApp();

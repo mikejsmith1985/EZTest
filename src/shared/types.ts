@@ -6,7 +6,7 @@
 // ── AI Provider Types ──────────────────────────────────────────────────────
 
 /** The supported AI model providers. Add new providers here as they become viable. */
-export type AiProviderName = 'openai' | 'anthropic' | 'github';
+export type AiProviderName = 'openai' | 'anthropic' | 'github' | 'copilot';
 
 /** A single message in an AI conversation context. */
 export interface AiMessage {
@@ -82,6 +82,25 @@ export interface ComponentAnalysis {
   sourceCode: string;
 }
 
+// ── Forge App Detection Types ──────────────────────────────────────────────
+
+/**
+ * Context about a Jira Forge Custom UI app detected in the project.
+ *
+ * Forge apps render their UI inside an iframe embedded in a Jira Cloud page.
+ * Tests for these apps cannot navigate to internal React Router paths directly —
+ * they must navigate to the Jira project page and then interact through frameLocator.
+ *
+ * This context is detected automatically from package.json (@forge/react dependency)
+ * and the full Jira page URL is extracted from existing test fixtures when present.
+ */
+export interface ForgeAppContext {
+  /** Full Jira path to the page where this Forge app is embedded, e.g. /jira/software/projects/ACRP/apps/... */
+  forgeProjectPageUrl: string;
+  /** Playwright frameLocator selector to locate the Forge Custom UI iframe */
+  iframeSelector: string;
+}
+
 // ── User Flow Types ────────────────────────────────────────────────────────
 
 /**
@@ -91,8 +110,10 @@ export interface ComponentAnalysis {
 export interface UserFlowStep {
   /** Human-readable description of the action (e.g., "Click the Submit button") */
   actionDescription: string;
-  /** The interactive element that drives this action */
+  /** The interactive element that drives this action (resolved from component analysis) */
   targetElement?: InteractiveElement;
+  /** AI's text description of the target element (e.g., "the Submit Order button") */
+  targetElementDescription?: string;
   /** What the user expects to see after taking this action */
   expectedOutcome: string;
   /** Whether this step is a navigation (changes the page URL) */

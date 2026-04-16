@@ -5,10 +5,112 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.2] - 2026-04-16
 
 ### Added
-- **Smart priority-based file selection in `analyzeSourceDirectory`** — files are now scored and sorted by UI importance before the `maxFileCount` limit is applied, so the most valuable files (pages, routes, dashboards, login screens, forms) are always analyzed first instead of relying on arbitrary filesystem order.
+- **Portable Windows release bundle** — `build:portable` now creates `release/EZTest-windows-portable.zip`, a self-contained Windows bundle that includes `EZTest.exe`, the compiled `dist/` runtime, `node_modules/`, `package.json`, docs, and a bundled `node.exe`. Users can extract it anywhere and launch EZTest without cloning the repo or installing Node globally.
+- **Pure portable-release helper module + unit tests** — release asset selection and semver comparison now live in `src/shared/portableRelease.ts`, covered by `tests/unit/portableRelease.spec.ts`.
+
+### Changed
+- **Version set to `0.1.2`** in `package.json`, `package-lock.json`, `src/cli/index.ts`, and `src/mcp/server.ts`.
+- **`EZTest.exe` launcher now targets a portable bundle instead of a repo layout** — it validates the extracted bundle, prefers a bundled `node.exe`, waits for the local UI server to become ready before opening the browser, and supports extracted folders anywhere on disk.
+- **In-app updates now stage the next portable bundle** — the dashboard update flow no longer runs `git pull` / `npm install`. It downloads `EZTest-windows-portable.zip` from GitHub releases, extracts it into `updates/pending-portable-update`, and applies it on the next app launch.
+
+### Fixed
+- **"EZTest.exe must be inside the project directory" launch failure** — the launcher no longer assumes a source-repo folder structure, so users can keep EZTest on the Desktop, in Downloads, or any other extracted directory.
+
+## [0.1.1] - 2026-04-13
+
+### Added
+- **"Set Up EZTest In My IDE" card on the main page** — a fifth dashboard card that opens a plain-English MCP helper for VS Code, Cursor, Windsurf, and Claude Code. Users now get copy-ready setup snippets with the exact local Node.js and EZTest MCP paths already filled in, so IDE setup is reduced to: pick your IDE → copy → paste → save.
+
+### Changed
+- **Version set to `0.1.1`** in `package.json`, `package-lock.json`, `src/cli/index.ts`, and `src/mcp/server.ts`.
+- **Generate / Preview / Run Tests now require a real app URL in the UI** — EZTest prompts for the browser URL before starting these workflows instead of silently falling back to unusable guesses like `http://localhost:3000` or relative Jira paths.
+
+### Fixed
+- **Forge app navigation URLs** — relative Jira paths are now resolved against the configured app URL before they reach generated tests, preventing invalid `page.goto('/jira/...')` navigations.
+
+## [0.1.0] - 2026-04-13
+
+### Added
+- **`eztest mcp` command** — starts the EZTest MCP server over stdio, exposing all three EZTest engines as Model Context Protocol tools. Any MCP-capable IDE (VS Code GitHub Copilot, Cursor, Claude Code, Windsurf) can now invoke EZTest capabilities directly without leaving the editor.
+- **`eztest-mcp` binary** — dedicated standalone entry point (`npx eztest-mcp`) for IDE MCP client configuration. IDEs launch this as a subprocess; it handles the stdio JSON-RPC transport automatically.
+- **`src/mcp/server.ts`** — MCP Server implementation using `@modelcontextprotocol/sdk`. Registers and handles all six tools. All EZTest log output is redirected to stderr on startup to prevent JSON-RPC stream corruption.
+- **`src/mcp/sessionStore.ts`** — in-memory recording session store. Tracks the lifecycle (`running → completed | error`) of browser recording sessions started via the `start_recording` MCP tool, enabling the non-blocking `start_recording` / `get_recording` handshake pattern.
+- **`src/mcp/index.ts`** — standalone entry point for the `eztest-mcp` binary.
+- **`src/cli/commands/mcp.ts`** — CLI command registration for `eztest mcp`.
+- **`redirectLoggingToStderr()` in `logger.ts`** — new export that switches all `logInfo` / `logSuccess` / `logDebug` output from stdout to stderr. Required for MCP stdio mode where stdout is reserved for JSON-RPC messages.
+- **Six MCP tools**:
+  | Tool | Description |
+  |---|---|
+  | `analyze_source` | AST-scan a source directory; returns component + element summary |
+  | `generate_tests` | Full pipeline: source → user flows → Playwright `.spec.ts` files |
+  | `start_recording` | Launch browser with annotation overlay (non-blocking, returns sessionId) |
+  | `get_recording` | Poll recording session for status and completed bug reports |
+  | `reproduce_bug` | Generate + run a failing Playwright test from a bug report |
+  | `fix_and_validate` | Full autonomous loop: reproduce → AI fix → validation suite |
+
+### Changed
+- **Version set to `0.1.0`** in `package.json`, `src/cli/index.ts`, and `src/mcp/server.ts`.
+- **`logInfo` / `logSuccess` / `logDebug`** now route through an internal `writeLog()` helper that writes to stderr when `redirectLoggingToStderr()` has been called (MCP mode), otherwise to stdout (CLI mode as before). `logWarning` / `logError` already wrote to stderr and are unchanged in behavior.
+
+### Fixed
+- **Shallow "smoke test" generation** — generated tests were trivially asserting that pages load without crashing instead of testing real user behavior. Root cause: the test code generation prompt received only text descriptions of flow steps but no element metadata (aria-labels, testIds, handler names, source code). The AI had to guess selectors, so it fell back to the safest possible assertion: "page is visible." Three fixes applied:
+  1. **`targetElementDescription` preserved** — `normalizeAiGeneratedFlow()` in `flowMapper.ts` now passes through the AI's text description of target elements instead of discarding it
+  2. **Element context injected into test generation prompt** — `buildTestCodeGenerationPrompt()` in `promptTemplates.ts` now accepts and formats `involvedComponentAnalyses` with full element metadata (role, text, aria-label, testId, handler, classes) and a truncated source excerpt per component, giving the AI concrete selectors to write against
+  3. **Anti-smoke-test instructions** — the prompt now explicitly forbids tests that only navigate + check visibility, forbids catch-all regex matchers, and requires every test to interact with elements and assert on specific outcomes
+- **Component analyses threaded to test generation** — `generateTestsForFlows()` in `testGenerator.ts` now accepts optional `componentAnalyses` and builds a per-flow lookup map to resolve `involvedComponents` names to their full `ComponentAnalysis` data. Both the CLI (`generate.ts`) and MCP server (`server.ts`) pass component analyses through.
+- **Quota-aware assertion review** — when running on the GitHub Models free tier (`github` provider), the `generate` command now estimates total API calls before test generation starts. If the assertion review pass would push remaining calls above 45 (the HIGH-tier daily quota), review is auto-disabled to avoid cascading through multiple model quotas. Users see a clear warning explaining the savings and can force-enable review with explicit flags.
+- **Pre-flight API call estimation** — the `generate` command now logs estimated remaining API calls (test generation + optional review) before starting, so users on free tiers can anticipate quota usage and rotation.
+- **Improved quota-exhaustion error messages** — both the flow-mapping catch block and the all-models-exhausted error in `aiClient.ts` now suggest actionable options: `--no-review`, `--max-flows`, `EZTEST_AI_PROVIDER=copilot` (for Copilot Pro users), and paid provider configuration.
+- **Fixed `.env` misconfiguration** — changed `EZTEST_AI_PROVIDER=openai` to `github`. The previous value caused config resolution to look for a non-existent `OPENAI_API_KEY`, then fall through to the `github` provider silently. The explicit value now matches the actual provider used.
+
+### Added
+- **GitHub Copilot Chat API provider (`EZTEST_AI_PROVIDER=copilot`)** — new provider that calls `api.githubcopilot.com` instead of the GitHub Models API. Delivers 16 384 output tokens per call (4× the GitHub Models free-tier cap) using only 0x-premium models, eliminating most dynamic batch-splitting overhead.
+- **`AiClient.rotationSize` and `AiClient.hasFreeTierQuotaLimits` getters** — expose model rotation metadata so the `generate` command can make quota-aware decisions (e.g., auto-disabling review) without coupling to provider internals.
+- **`GITHUB_FREE_TIER_QUOTA_THRESHOLD` constant in `generate.ts`** — set to 45, used by the quota-aware review logic to decide when auto-disabling review would prevent quota churn.
+- **`src/shared/copilotAuth.ts`** — Copilot OAuth token manager: calls `gh auth token` to read the keyring-stored OAuth token (with `copilot` scope), caches it for 30 minutes to avoid repeated subprocess spawns. All helpers are exported for testability; the injected `tokenFetcher` parameter enables unit tests without the real `gh` CLI.
+- **`COPILOT_FREE_MODEL_ROTATION`** in `config.ts` — ordered model rotation for Copilot Pro/Pro+: `['gpt-4.1', 'gpt-5-mini', 'gpt-5.4-mini', 'claude-sonnet-4.6']`. Prioritizes 0x-premium models first, then cost-efficient fallbacks.
+- **2-model rotation for copilot provider** — `buildModelRotationList()` now branches on `provider === 'copilot'` the same way it does for `provider === 'github'`, so `gpt-4.1` exhaustion automatically falls back to `gpt-5-mini`.
+- **Copilot provider in `.env.example`** — documents `EZTEST_AI_PROVIDER=copilot` with setup instructions (`gh auth login`) and a note that no separate API key is needed.
+- **11 new unit tests in `copilotAuth.spec.ts`** — covers `parseTokenResponse` (valid, missing fields, invalid JSON), `getCopilotSessionToken` (cache hit, cache miss, near-expiry refresh, expired token refresh, error propagation), and `clearCopilotTokenCache` (forces re-fetch).
+- **"Run Your Tests" card on main page** — persistent 4th card in the action grid so tests can be run at any time without re-generating. Spawns `npx playwright test` in the project root, streams results live to the terminal modal.
+- **"Open last report" link on Run Tests card** — appears after any test run and stays visible after the modal closes, so the Playwright HTML report is always one click away.
+- **Run Tests from UI** — after a successful test generation, a "▶ Run Tests" button appears in the modal done bar.
+- **Open Playwright HTML Report button** — after a test run completes (pass or fail), a "📊 Open Report" button appears. Clicking it calls `POST /api/open-report` which opens `playwright-report/index.html` in the default browser via `cmd /c start`.
+- **`spawnAndStreamProcess()` helper in `uiServer.ts`** — shared streaming infrastructure used by both EZTest CLI runs and Playwright test runs, eliminating duplicate spawn/stream logic.
+- **`run-tests` workflow in `RunConfig`** — the run config union type now includes `'run-tests'` and an optional `workingDir` field so the server knows which project root to use for Playwright.
+- **Progress bar in run modal** — live progress indicator with per-stage labels (`Analyzing source code` → `Mapping N/M batches` → `Writing test N/M`) and a live countdown timer during API rate-limit retries.
+- **Per-flow write logging in `testGenerator.ts`** — `logInfo("Writing test N/M: flowName")` fires before each AI call so the progress bar advances steadily through the generation phase.
+- **Dynamic token-aware batch splitting in `flowMapper.ts`** — `splitIntoDynamicBatches()` replaces the old fixed-size batch splitter. Each batch is sized based on the estimated number of output tokens the AI will produce, keeping every API call under 90% of the 4096-token Copilot Pro output cap.
+- **`estimateComponentOutputTokens()` helper** — estimates output tokens per component: `max(1, ceil(elements/2)) × 3 variants × 220 tokens/variant`. Both functions are exported and unit-tested.
+- **Per-batch token budget logging** — each batch logs its component count and estimated output tokens so users can see why components were grouped together.
+- **10 new unit tests in `flowMapper.spec.ts`** covering `estimateComponentOutputTokens` and `splitIntoDynamicBatches`.
+
+### Changed
+- **`FLOW_MAPPING_BATCH_SIZE` constant removed** — replaced by `TARGET_BATCH_OUTPUT_TOKENS = 3600`, `BATCH_RESPONSE_OVERHEAD_TOKENS = 200`, and `ESTIMATED_TOKENS_PER_FLOW_VARIANT = 220`.
+
+- **Automatic model rotation on quota exhaustion** — when a GitHub Models model exhausts its daily quota, EZTest automatically rotates to the next model in the `GITHUB_FREE_MODEL_ROTATION` list instead of failing. Test generation continues uninterrupted across up to 19 different free-tier models (OpenAI gpt-4.1/4o/mini/nano, Meta Llama 4 Scout/Maverick/3.3-70B/405B, DeepSeek-V3, Mistral Medium/Small/Codestral, AI21 Jamba, Cohere, Phi-4, and gpt-5-mini for Copilot Pro users).
+- **`GITHUB_FREE_MODEL_ROTATION` constant in `config.ts`** — ordered list of all non-premium GitHub Models model IDs, arranged by quality tier (HIGH 50/day before LOW 150/day) with clear comments explaining the reasoning for each model's position.
+- **`ModelQuotaExhaustedError` class in `aiClient.ts`** — exported error type thrown by `executeWithRetry` when quota exhaustion is detected. Carries `exhaustedModelName` and `secondsUntilReset` for precise UI messaging. `AiClient.chat()` catches this internally; callers only see it if all 19 models are exhausted.
+- **`extractRetryAfterSeconds()` helper** — extracts the raw seconds value from the retry-after header without filtering, enabling `ModelQuotaExhaustedError` to show users an accurate reset countdown.
+- **`buildModelRotationList()` helper** — constructs the model rotation array from `AiConfig`: full rotation for GitHub provider, single-model list for OpenAI/Anthropic. If a `modelOverride` is set, the rotation starts at that model's position and falls through.
+
+### Changed
+- **`getDefaultModelForProvider('github')`** now returns `GITHUB_FREE_MODEL_ROTATION[0]` (`gpt-4.1`) instead of the hard-coded `'gpt-4o'`, keeping the default in sync with the rotation list priority order.
+- **`AiClient` class** replaces `resolvedModelName: string` with `modelRotationList: readonly string[]` + `activeModelIndex: number`. The `modelName` getter now returns the currently active model (which changes as models are rotated).
+- **`executeWithRetry`** now accepts a `currentModelName: string` parameter and throws `ModelQuotaExhaustedError` on quota exhaustion instead of `break`-ing out of the retry loop and re-throwing a raw API error.
+- **Quota exhaustion warning message** in `extractRetryAfterDelayMs` updated from "Switch to a different AI provider" to "EZTest will automatically try the next available model in the free-tier rotation."
+
+- **`DEFAULT_MAX_FLOW_COUNT = 10` in `generate.ts`** — caps the number of user flows to generate tests for (default: 10). GitHub Models free tier allows ~10 requests/minute; without this cap, 30+ flows generate 30+ sequential API calls and can take 15+ minutes to complete.
+- **`FLOW_MAPPING_BATCH_SIZE = 40` in `flowMapper.ts`** — all components are sent in one batch for flow generation (down from many small batches), dramatically reducing the number of API calls per run.
+- **`FLOW_GENERATION_SYSTEM_PROMPT`** — compact ~150-token system prompt specifically for the flow-mapping stage, replacing the full `BEHAVIORAL_QA_SYSTEM_PROMPT` (~875 tokens) that was causing GitHub Models 8K token limit failures when combined with 20+ component element lists.
+- **Quota exhaustion detection in `aiClient.ts`** — when GitHub Models returns a `retry-after` header greater than 5 minutes (indicating the daily free-tier quota is exhausted), EZTest immediately fails with an actionable error message. Previously would wait 23 hours.
+- **`hasRetryAfterHeader()` helper** — distinguishes between "no retry info" (use exponential backoff) and "quota exhausted" (fail fast with guidance).
+- **`MAX_RETRYABLE_DELAY_MS = 300_000`** — 5-minute ceiling for retry-after values; anything longer signals daily quota exhaustion.
+- **Extended `isTransientApiError`** to include GitHub Models 413 `tokens_limit_reached` as retryable.
+- **Smart priority-based file selection in `analyzeSourceDirectory`**— files are now scored and sorted by UI importance before the `maxFileCount` limit is applied, so the most valuable files (pages, routes, dashboards, login screens, forms) are always analyzed first instead of relying on arbitrary filesystem order.
   - New `scoreFileByImportance` function assigns scores 100–10 based on directory name (`pages`, `routes`, `views`, `screens`, `app`), exact component name (`Login`, `Dashboard`, `Cart`, etc.), filename suffix (`Page`, `Screen`, `Form`, `Modal`), and path depth.
   - New `calculatePathDepth` helper breaks ties within the same score tier by preferring shallower files.
 - **Extended glob exclude patterns** in `discoverSourceFiles` — Storybook stories, TypeScript declaration stubs, minified bundles, build output directories (`.next`, `build`, `out`, `vendor`, `.turbo`), and mock/fixture directories are now always excluded regardless of project config.

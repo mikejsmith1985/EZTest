@@ -1,10 +1,11 @@
 {
   "name": "eztest",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "AI-powered behavioral testing companion — reads your code, understands user intent, generates real Playwright tests",
   "main": "dist/cli/index.js",
   "bin": {
-    "eztest": "dist/cli/index.js"
+    "eztest": "dist/cli/index.js",
+    "eztest-mcp": "dist/mcp/index.js"
   },
   "files": [
     "dist/",
@@ -14,6 +15,8 @@
   "scripts": {
     "build": "tsc",
     "build:launcher": "powershell -NoProfile -ExecutionPolicy Bypass -File launcher/build.ps1",
+    "build:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File launcher/build-portable.ps1",
+    "build:release": "npm run build && npm run build:launcher && npm run build:portable",
     "prepublishOnly": "npm run build",
     "dev": "tsx src/cli/index.ts",
     "test": "playwright test",
@@ -23,7 +26,13 @@
     "format": "prettier --write src/**/*.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["testing", "playwright", "ai", "e2e", "behavioral-testing"],
+  "keywords": [
+    "testing",
+    "playwright",
+    "ai",
+    "e2e",
+    "behavioral-testing"
+  ],
   "author": "EZTest Contributors",
   "repository": {
     "type": "git",
@@ -52,6 +61,7 @@
     "@babel/parser": "^7.29.2",
     "@babel/traverse": "^7.29.0",
     "@babel/types": "^7.29.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/babel__parser": "^7.0.0",
     "@types/babel__traverse": "^7.28.0",
     "@types/express": "^5.0.6",

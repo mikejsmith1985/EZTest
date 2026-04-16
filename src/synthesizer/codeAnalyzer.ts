@@ -8,8 +8,8 @@
  *
  * Supports: React/JSX, TypeScript/TSX. Vue/Angular support is via the plugin system.
  */
-import { readFileSync } from 'node:fs';
-import { resolve, relative, extname, basename } from 'node:path';
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve, relative, extname, basename, join, dirname } from 'node:path';
 import { glob } from 'glob';
 import * as babelParser from '@babel/parser';
 import babelTraverse from '@babel/traverse';
@@ -25,7 +25,7 @@ const traverseAst = ((babelTraverse as any).default ?? babelTraverse) as (
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   visitors: Record<string, (path: NodePath<any>) => void>,
 ) => void;
-import type { ComponentAnalysis, InteractiveElement, InteractiveElementKind } from '../shared/types.js';
+import type { ComponentAnalysis, ForgeAppContext, InteractiveElement, InteractiveElementKind } from '../shared/types.js';
 import { logDebug, logInfo, logWarning } from '../shared/logger.js';
 
 // ── Element Detection Constants ────────────────────────────────────────────
@@ -350,9 +350,16 @@ const PARSEABLE_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js'];
 /**
  * Extra glob ignore patterns always applied during file discovery — regardless of caller config.
  * Catches generated artifacts (Storybook stories, declaration stubs, minified bundles, build
- * output, mock fixtures) that never contain user-facing UI flows worth testing.
+ * output, mock fixtures, and test files) that never contain user-facing UI flows worth testing.
+ *
+ * NOTE: Test and spec files are included here as a safety net even though callers typically
+ * also pass them via globalExcludePatterns. Server-side test files in routes/ directories
+ * score 100 (highest tier) because of their parent directory — without explicit exclusion
+ * they would consume the entire top-N file budget with zero interactive UI elements.
  */
 const ADDITIONAL_EXCLUDE_PATTERNS: string[] = [
+  '**/*.test.*',
+  '**/*.spec.*',
   '**/*.stories.*',
   '**/*.story.*',
   '**/*.d.ts',
@@ -363,6 +370,7 @@ const ADDITIONAL_EXCLUDE_PATTERNS: string[] = [
   '**/vendor/**',
   '**/.turbo/**',
   '**/coverage/**',
+  '**/__tests__/**',
   '**/__mocks__/**',
   '**/__fixtures__/**',
   '**/fixtures/**',
@@ -472,23 +480,154 @@ async function discoverSourceFiles(
   sourceDirectory: string,
   excludePatterns: string[],
 ): Promise<string[]> {
-  // glob requires forward slashes even on Windows — normalize backslashes to forward slashes
-  const normalizedSourceDirectory = sourceDirectory.replace(/\\/g, '/');
-  const globPattern = `${normalizedSourceDirectory}/**/*{${PARSEABLE_EXTENSIONS.join(',')}}`;
+  // IMPORTANT: On Windows, glob's ignore patterns only work correctly when the
+  // main glob pattern is RELATIVE (not absolute). With an absolute pattern like
+  // "C:/foo/**/*.ts", glob returns absolute paths with Windows backslashes, and
+  // relative ignore patterns like "**/node_modules/**" fail to match because
+  // minimatch splits on "/" but the path uses "\".
+  //
+  // Fix: Use cwd + relative pattern so glob works with relative paths throughout,
+  // then manually resolve each result back to absolute after filtering is complete.
+  const relativeGlobPattern = `**/*{${PARSEABLE_EXTENSIONS.join(',')}}`;
 
   // Always exclude the additional patterns on top of whatever the caller provides
   const allExcludePatterns = [...excludePatterns, ...ADDITIONAL_EXCLUDE_PATTERNS];
 
-  const discoveredFiles = await glob(globPattern, {
+  const relativeFiles = await glob(relativeGlobPattern, {
+    cwd: sourceDirectory,
     ignore: allExcludePatterns,
-    absolute: true,
+    nodir: true, // Prevent directories named like *.js (e.g. node_modules/ipaddr.js) from being returned
   });
+
+  // Resolve each relative path back to an absolute path rooted at sourceDirectory
+  const discoveredFiles = relativeFiles.map(relativeFilePath => join(sourceDirectory, relativeFilePath));
 
   logDebug(`Discovered ${discoveredFiles.length} source files in ${sourceDirectory}`);
   return discoveredFiles;
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
+
+// ── Forge App Detection ─────────────────────────────────────────────────────
+
+/**
+ * Scans the project root for Forge app indicators and extracts the Jira page URL.
+ *
+ * A Forge Custom UI app renders inside a Jira iframe — tests cannot navigate to internal
+ * React Router paths like /dashboard directly. This function detects the pattern so
+ * EZTest can generate iframe-aware tests automatically, without any manual configuration.
+ *
+ * Detection strategy:
+ *  1. Check package.json for @forge/react or @forge/bridge dependency
+ *  2. If found, scan common test fixture files for the full Jira project page URL
+ *  3. Return a ForgeAppContext with the page URL and iframe selector, or null if not Forge
+ */
+/**
+ * Walks up the directory tree from the given path to find the nearest directory
+ * that contains a package.json — this is the project root.
+ *
+ * Handles the common case where the user passes their `src/` folder as the source
+ * directory, but the Forge dependencies and e2e fixtures live at the project root.
+ * Stops at the filesystem root to avoid infinite loops.
+ */
+function findProjectRootFromDirectory(startDirectory: string): string | null {
+  let currentDirectory = startDirectory;
+
+  // Walk up until we find package.json or hit the filesystem root
+  while (true) {
+    if (existsSync(join(currentDirectory, 'package.json'))) {
+      return currentDirectory;
+    }
+
+    const parentDirectory = dirname(currentDirectory);
+    // Stop when we've reached the filesystem root (dirname returns same path at root)
+    if (parentDirectory === currentDirectory) return null;
+    currentDirectory = parentDirectory;
+  }
+}
+
+export function detectForgeAppContext(projectRootDirectory: string): ForgeAppContext | null {
+  // The source directory passed in may be a subdirectory like `src/`.
+  // Walk up to find the project root that contains package.json, so we can check
+  // for Forge dependencies and find the e2e fixtures file.
+  const resolvedRoot = findProjectRootFromDirectory(resolve(projectRootDirectory));
+  if (!resolvedRoot) return null;
+
+  const packageJsonPath = join(resolvedRoot, 'package.json');
+  if (!existsSync(packageJsonPath)) return null;
+
+  let packageJson: { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+  try {
+    packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as typeof packageJson;
+  } catch {
+    return null;
+  }
+
+  const allDependencies = {
+    ...(packageJson.dependencies ?? {}),
+    ...(packageJson.devDependencies ?? {}),
+  };
+
+  // @forge/react is the Forge Custom UI library; @forge/bridge is the Forge core bridge.
+  // Either one is a reliable indicator that this is a Jira Forge app.
+  const isForgeApp = '@forge/react' in allDependencies || '@forge/bridge' in allDependencies;
+  if (!isForgeApp) return null;
+
+  const forgeProjectPageUrl = extractForgePageUrlFromProject(resolvedRoot);
+
+  // The Forge iframe src varies by environment (dev vs prod) but always matches one of these patterns.
+  const iframeSelector = 'iframe[src*="atlassian-dev.net"], iframe[src*="atlassian.net/x/"], iframe';
+
+  logInfo(`  Forge Custom UI app detected — generating iframe-aware tests`);
+  if (!forgeProjectPageUrl) {
+    logWarning(
+      '  Forge project page URL not found in test fixtures.\n' +
+      '  Add the full Jira page URL to your eztest-spec.md or fixtures file so tests know where to navigate.\n' +
+      '  Example: /jira/software/projects/MYKEY/apps/<appUuid>/<installationId>',
+    );
+  }
+
+  return { forgeProjectPageUrl, iframeSelector };
+}
+
+/**
+ * Scans common test fixture and config files for a Jira Forge project page URL.
+ * The URL pattern is: /jira/software/projects/{KEY}/apps/{uuid}/{uuid}
+ *
+ * Returns the first match found, or an empty string if none is found.
+ */
+function extractForgePageUrlFromProject(projectRootDirectory: string): string {
+  const candidateFiles = [
+    join(projectRootDirectory, 'e2e', 'fixtures.ts'),
+    join(projectRootDirectory, 'e2e', 'fixtures.js'),
+    join(projectRootDirectory, 'tests', 'fixtures.ts'),
+    join(projectRootDirectory, 'tests', 'fixtures.js'),
+    join(projectRootDirectory, 'playwright.config.ts'),
+    join(projectRootDirectory, 'playwright.config.js'),
+    join(projectRootDirectory, 'eztest-spec.md'),
+  ];
+
+  // Match the Jira Forge app URL structure: /jira/software/projects/{KEY}/apps/{uuid}/{uuid}
+  const forgePageUrlPattern = /['"`](\/jira\/software\/projects\/[A-Z0-9]+\/apps\/[a-f0-9-]+\/[a-f0-9-]+)['"`]/;
+
+  for (const candidateFilePath of candidateFiles) {
+    if (!existsSync(candidateFilePath)) continue;
+    try {
+      const fileContent = readFileSync(candidateFilePath, 'utf-8');
+      const urlMatch = forgePageUrlPattern.exec(fileContent);
+      if (urlMatch) {
+        logDebug(`  Forge page URL extracted from: ${candidateFilePath}`);
+        return urlMatch[1];
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return '';
+}
+
+
 
 /** Options for the code analyzer. */
 export interface CodeAnalyzerOptions {
