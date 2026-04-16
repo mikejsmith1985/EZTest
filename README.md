@@ -48,13 +48,24 @@ EZTest has two engines and a feedback loop:
 
 ## Installation
 
+### Windows portable app
+
+Download **`EZTest-windows-portable.zip`** from the latest GitHub release, extract it anywhere you want, and launch **`EZTest.exe`** from that extracted folder.
+
+**Portable bundle requirements:**
+- No repo checkout required
+- No special folder name required
+- No system-wide Node.js install required
+
+### npm / npx
+
 ```bash
 npm install -g eztest
 # or use locally
 npx eztest --help
 ```
 
-**Requirements:**
+**CLI requirements:**
 - Node.js 18+
 - An OpenAI or Anthropic API key
 - A Playwright-compatible app running locally
@@ -63,14 +74,14 @@ npx eztest --help
 
 ## Quick Start
 
-### Option A — Double-click launcher (no terminal required)
+### Option A — Double-click portable app (no terminal required)
 
-If you cloned this repository, just double-click **`Launch EZTest.bat`** in the project folder. It will:
-1. Build EZTest on first run (takes ~10 seconds once)
-2. Start the wizard server
-3. Open your browser automatically to the setup wizard
+Open the extracted portable folder and double-click **`EZTest.exe`**. It will:
+1. Start the EZTest local UI server
+2. Open your browser automatically
+3. Keep its own settings inside the extracted bundle folder
 
-That's it — no terminal, no commands.
+When EZTest offers an update, it downloads the next portable bundle for you and applies it on the next launch.
 
 ### Option B — Command line
 

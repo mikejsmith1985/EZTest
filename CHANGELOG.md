@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.2] - 2026-04-16
+
+### Added
+- **Portable Windows release bundle** — `build:portable` now creates `release/EZTest-windows-portable.zip`, a self-contained Windows bundle that includes `EZTest.exe`, the compiled `dist/` runtime, `node_modules/`, `package.json`, docs, and a bundled `node.exe`. Users can extract it anywhere and launch EZTest without cloning the repo or installing Node globally.
+- **Pure portable-release helper module + unit tests** — release asset selection and semver comparison now live in `src/shared/portableRelease.ts`, covered by `tests/unit/portableRelease.spec.ts`.
+
+### Changed
+- **Version set to `0.1.2`** in `package.json`, `package-lock.json`, `src/cli/index.ts`, and `src/mcp/server.ts`.
+- **`EZTest.exe` launcher now targets a portable bundle instead of a repo layout** — it validates the extracted bundle, prefers a bundled `node.exe`, waits for the local UI server to become ready before opening the browser, and supports extracted folders anywhere on disk.
+- **In-app updates now stage the next portable bundle** — the dashboard update flow no longer runs `git pull` / `npm install`. It downloads `EZTest-windows-portable.zip` from GitHub releases, extracts it into `updates/pending-portable-update`, and applies it on the next app launch.
+
+### Fixed
+- **"EZTest.exe must be inside the project directory" launch failure** — the launcher no longer assumes a source-repo folder structure, so users can keep EZTest on the Desktop, in Downloads, or any other extracted directory.
+
 ## [0.1.1] - 2026-04-13
 
 ### Added

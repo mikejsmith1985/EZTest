@@ -5,12 +5,19 @@
  */
 import { createServer } from 'node:http';
 import { get as httpsGet } from 'node:https';
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import express from 'express';
 import { Server as SocketIoServer, type Socket as SocketIoSocket } from 'socket.io';
+import {
+  isVersionNewer,
+  PORTABLE_RELEASE_ASSET_NAME,
+  selectPortableReleaseAsset,
+  type GithubReleaseSummary,
+} from '../shared/portableRelease.js';
 import { buildWizardPageHtml } from './wizardPage.js';
 
 // ── GitHub auto-update constants ───────────────────────────────────────────────
@@ -18,6 +25,10 @@ import { buildWizardPageHtml } from './wizardPage.js';
 /** GitHub repo owner and name for the EZTest releases API. */
 const GITHUB_RELEASES_OWNER = 'mikejsmith1985';
 const GITHUB_RELEASES_REPO  = 'EZTest';
+
+/** Directory names used by the staged portable updater. */
+const PORTABLE_UPDATES_DIRECTORY_NAME = 'updates';
+const STAGED_PORTABLE_UPDATE_DIRECTORY_NAME = 'pending-portable-update';
 
 /**
  * Describes the result of checking GitHub releases for a newer version.
@@ -28,6 +39,7 @@ interface UpdateCheckResult {
   currentVersion: string;
   latestVersion:  string;
   releaseUrl:     string;
+  canInstallInApp: boolean;
 }
 
 /**
@@ -35,7 +47,7 @@ interface UpdateCheckResult {
  * and HTML URL. Rejects with an error if the request fails or the response is
  * malformed. Uses Node's built-in https module — no external dependencies needed.
  */
-function fetchLatestGithubRelease(): Promise<{ tagName: string; htmlUrl: string }> {
+function fetchLatestGithubRelease(): Promise<GithubReleaseSummary> {
   return new Promise((resolvePromise, rejectPromise) => {
     const requestOptions = {
       hostname: 'api.github.com',
@@ -52,12 +64,25 @@ function fetchLatestGithubRelease(): Promise<{ tagName: string; htmlUrl: string 
       response.on('data', (chunk: Buffer) => { rawBody += chunk.toString(); });
       response.on('end', () => {
         try {
-          const parsed = JSON.parse(rawBody) as { tag_name?: string; html_url?: string };
+          const parsed = JSON.parse(rawBody) as {
+            tag_name?: string;
+            html_url?: string;
+            assets?: Array<{ name?: string; browser_download_url?: string }>;
+          };
           if (!parsed.tag_name) {
             rejectPromise(new Error('GitHub API response missing tag_name'));
             return;
           }
-          resolvePromise({ tagName: parsed.tag_name, htmlUrl: parsed.html_url ?? '' });
+          resolvePromise({
+            tagName: parsed.tag_name,
+            htmlUrl: parsed.html_url ?? '',
+            assets: (parsed.assets ?? [])
+              .filter((asset) => typeof asset.name === 'string' && typeof asset.browser_download_url === 'string')
+              .map((asset) => ({
+                name: asset.name as string,
+                browserDownloadUrl: asset.browser_download_url as string,
+              })),
+          });
         } catch {
           rejectPromise(new Error('Failed to parse GitHub releases response'));
         }
@@ -79,7 +104,7 @@ function fetchLatestGithubRelease(): Promise<{ tagName: string; htmlUrl: string 
  */
 function readCurrentVersion(): string {
   try {
-    const packageJsonPath = join(process.cwd(), 'package.json');
+    const packageJsonPath = join(getEzTestRootDirectory(), 'package.json');
     const packageJson     = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { version?: string };
     return packageJson.version ?? '0.0.0';
   } catch {
@@ -87,25 +112,152 @@ function readCurrentVersion(): string {
   }
 }
 
-/**
- * Compares two semver-style version strings (e.g. "2.3.1" vs "2.4.0").
- * Returns true if candidateVersion is strictly greater than currentVersion.
- * The leading "v" is stripped before comparison so "v2.3.1" and "2.3.1" both work.
- */
-function isVersionNewer(currentVersion: string, candidateVersion: string): boolean {
-  const normaliseVersion = (versionString: string) =>
-    versionString.replace(/^v/, '').split('.').map(Number);
+/** Returns the EZTest install root. In portable mode this is the extracted bundle folder. */
+function getEzTestRootDirectory(): string {
+  return process.cwd();
+}
 
-  const currentParts   = normaliseVersion(currentVersion);
-  const candidateParts = normaliseVersion(candidateVersion);
+/** Returns the directory where downloaded portable updates are staged. */
+function getStagedPortableUpdateDirectory(): string {
+  return join(
+    getEzTestRootDirectory(),
+    PORTABLE_UPDATES_DIRECTORY_NAME,
+    STAGED_PORTABLE_UPDATE_DIRECTORY_NAME,
+  );
+}
 
-  for (let partIndex = 0; partIndex < 3; partIndex++) {
-    const currentPart   = currentParts[partIndex]   ?? 0;
-    const candidatePart = candidateParts[partIndex] ?? 0;
-    if (candidatePart > currentPart) return true;
-    if (candidatePart < currentPart) return false;
+/** Downloads a file over HTTPS and follows GitHub's redirect responses automatically. */
+function downloadFileOverHttps(downloadUrl: string, destinationFilePath: string): Promise<void> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const request = httpsGet(downloadUrl, {
+      headers: {
+        'User-Agent': 'EZTest-portable-updater/1.0',
+        'Accept': 'application/octet-stream',
+      },
+    }, (response) => {
+      const statusCode = response.statusCode ?? 0;
+      const redirectLocation = response.headers.location;
+
+      if (statusCode >= 300 && statusCode < 400 && redirectLocation) {
+        response.resume();
+        downloadFileOverHttps(redirectLocation, destinationFilePath)
+          .then(resolvePromise)
+          .catch(rejectPromise);
+        return;
+      }
+
+      if (statusCode !== 200) {
+        response.resume();
+        rejectPromise(new Error('Download failed with status code ' + statusCode));
+        return;
+      }
+
+      const destinationStream = createWriteStream(destinationFilePath);
+      response.pipe(destinationStream);
+
+      destinationStream.on('finish', () => {
+        destinationStream.close();
+        resolvePromise();
+      });
+
+      destinationStream.on('error', (streamError) => {
+        destinationStream.close();
+        rejectPromise(streamError);
+      });
+    });
+
+    request.on('error', (networkError) => rejectPromise(networkError));
+    request.setTimeout(30_000, () => {
+      request.destroy();
+      rejectPromise(new Error('Portable update download timed out'));
+    });
+  });
+}
+
+/** Extracts a portable zip file into the given destination directory using PowerShell. */
+function extractPortableArchive(zipFilePath: string, destinationDirectoryPath: string): Promise<void> {
+  const escapedZipFilePath = zipFilePath.replace(/'/g, "''");
+  const escapedDestinationDirectoryPath = destinationDirectoryPath.replace(/'/g, "''");
+
+  return new Promise((resolvePromise, rejectPromise) => {
+    const extractProcess = spawn('powershell', [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-Command',
+      "Expand-Archive -Force -LiteralPath '" + escapedZipFilePath + "' -DestinationPath '" + escapedDestinationDirectoryPath + "'",
+    ], {
+      shell: false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+
+    let errorOutput = '';
+
+    extractProcess.stderr?.on('data', (errorChunk: Buffer) => {
+      errorOutput += errorChunk.toString();
+    });
+
+    extractProcess.on('close', (exitCode) => {
+      if (exitCode === 0) {
+        resolvePromise();
+        return;
+      }
+
+      rejectPromise(new Error(
+        'Portable update extraction failed with exit code ' + String(exitCode) +
+        (errorOutput.trim() ? ': ' + errorOutput.trim() : ''),
+      ));
+    });
+
+    extractProcess.on('error', (processError) => rejectPromise(processError));
+  });
+}
+
+/** Downloads the newest portable bundle and stages it for application on next launch. */
+async function downloadAndStagePortableUpdate(): Promise<{ latestVersion: string }> {
+  const latestRelease = await fetchLatestGithubRelease();
+  const portableAsset = selectPortableReleaseAsset(latestRelease);
+
+  if (!portableAsset) {
+    throw new Error('Latest release does not contain the portable Windows bundle asset');
   }
-  return false; // versions are equal
+
+  const stagedUpdateDirectoryPath = getStagedPortableUpdateDirectory();
+  const temporaryZipFilePath = join(tmpdir(), 'eztest-portable-update-' + Date.now() + '.zip');
+
+  rmSync(stagedUpdateDirectoryPath, { recursive: true, force: true });
+  mkdirSync(stagedUpdateDirectoryPath, { recursive: true });
+
+  try {
+    await downloadFileOverHttps(portableAsset.browserDownloadUrl, temporaryZipFilePath);
+    await extractPortableArchive(temporaryZipFilePath, stagedUpdateDirectoryPath);
+  } catch (updateError) {
+    rmSync(stagedUpdateDirectoryPath, { recursive: true, force: true });
+    throw updateError;
+  } finally {
+    if (existsSync(temporaryZipFilePath)) {
+      unlinkSync(temporaryZipFilePath);
+    }
+  }
+
+  const stagedLauncherPath = join(stagedUpdateDirectoryPath, 'EZTest.exe');
+  const stagedNodeRuntimePath = join(stagedUpdateDirectoryPath, 'node.exe');
+  const stagedDependenciesDirectoryPath = join(stagedUpdateDirectoryPath, 'node_modules');
+  const stagedPackageJsonPath = join(stagedUpdateDirectoryPath, 'package.json');
+  const stagedCliEntryPath = join(stagedUpdateDirectoryPath, 'dist', 'cli', 'index.js');
+
+  if (
+    !existsSync(stagedLauncherPath) ||
+    !existsSync(stagedNodeRuntimePath) ||
+    !existsSync(stagedDependenciesDirectoryPath) ||
+    !existsSync(stagedPackageJsonPath) ||
+    !existsSync(stagedCliEntryPath)
+  ) {
+    rmSync(stagedUpdateDirectoryPath, { recursive: true, force: true });
+    throw new Error('Downloaded portable bundle is missing required runtime files');
+  }
+
+  return { latestVersion: latestRelease.tagName.replace(/^v/, '') };
 }
 
 
@@ -485,7 +637,7 @@ function spawnPlaywrightTestRun(
  * so subsequent status checks reflect the new key without a restart.
  */
 function persistEnvKey(envKey: string, envValue: string): void {
-  const envFilePath = join(process.cwd(), '.env');
+  const envFilePath = join(getEzTestRootDirectory(), '.env');
   let envFileContent = existsSync(envFilePath) ? readFileSync(envFilePath, 'utf-8') : '';
 
   // Replace existing key or append it — use a regex to handle inline values
@@ -511,7 +663,7 @@ function persistEnvKey(envKey: string, envValue: string): void {
 // ── App config helpers ─────────────────────────────────────────────────────────
 
 /** Path where EZTest stores its own settings (never the user's project folder). */
-const APP_CONFIG_FILE_PATH = join(process.cwd(), 'app-config.json');
+const APP_CONFIG_FILE_PATH = join(getEzTestRootDirectory(), 'app-config.json');
 
 /** Reads the saved app config, returning empty defaults if the file is missing. */
 function readAppConfig(): AppConfig {
@@ -994,13 +1146,15 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     const currentVersion = readCurrentVersion();
 
     fetchLatestGithubRelease()
-      .then(({ tagName, htmlUrl }) => {
-        const hasUpdate = isVersionNewer(currentVersion, tagName);
+      .then((latestRelease) => {
+        const portableAsset = selectPortableReleaseAsset(latestRelease);
+        const hasUpdate = isVersionNewer(currentVersion, latestRelease.tagName) && portableAsset !== null;
         const result: UpdateCheckResult = {
           hasUpdate,
           currentVersion,
-          latestVersion: tagName.replace(/^v/, ''),
-          releaseUrl:    htmlUrl,
+          latestVersion: latestRelease.tagName.replace(/^v/, ''),
+          releaseUrl: latestRelease.htmlUrl,
+          canInstallInApp: portableAsset !== null,
         };
         res.json(result);
       })
@@ -1010,7 +1164,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
           hasUpdate:      false,
           currentVersion,
           latestVersion:  currentVersion,
-          releaseUrl:     '',
+          releaseUrl: '',
+          canInstallInApp: false,
           error:          (checkError as Error).message,
         });
       });
@@ -1038,14 +1193,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       const cliArgs = buildCliArgsForWorkflow(runConfig);
 
       // Use the compiled dist if it exists, otherwise fall back to tsx (dev mode)
-      const cliEntryPath = join(process.cwd(), 'dist', 'cli', 'index.js');
+      const cliEntryPath = join(getEzTestRootDirectory(), 'dist', 'cli', 'index.js');
       const isBuilt      = existsSync(cliEntryPath);
-      const command      = isBuilt ? 'node' : 'tsx';
+      const command      = isBuilt ? process.execPath : 'tsx';
       const commandArgs  = isBuilt
         ? [cliEntryPath, ...cliArgs]
-        : [join(process.cwd(), 'src', 'cli', 'index.ts'), ...cliArgs];
+        : [join(getEzTestRootDirectory(), 'src', 'cli', 'index.ts'), ...cliArgs];
 
-      spawnAndStreamProcess(command, commandArgs, process.cwd(), clientSocket);
+      spawnAndStreamProcess(command, commandArgs, getEzTestRootDirectory(), clientSocket);
     });
 
     // Client requests cancellation of the active process
@@ -1062,82 +1217,36 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     });
 
     // Client asks to install the latest EZTest update.
-    // Runs: git pull → npm install → npm run build → npm run build:launcher
-    // Streams each line of output back as update:log events so the UI can show
-    // a live progress terminal in the update modal.
+    // Downloads the portable GitHub release zip, stages it in updates/, and
+    // applies it on the next launcher start so users never need the repo layout.
     clientSocket.on('update:install', () => {
-      const ezTestRootDirectory = process.cwd();
-
       const sendUpdateLog = (message: string) => {
         clientSocket.emit('update:log', { message });
       };
 
-      sendUpdateLog('Starting EZTest update...');
-      sendUpdateLog('Working directory: ' + ezTestRootDirectory);
+      sendUpdateLog('Checking GitHub releases for a newer portable bundle...');
+      sendUpdateLog('Bundle root: ' + getEzTestRootDirectory());
+      sendUpdateLog('Expected asset: ' + PORTABLE_RELEASE_ASSET_NAME);
       sendUpdateLog('');
 
-      // Chain: git pull → npm install → npm run build → npm run build:launcher
-      // Each step is run only if the previous one succeeded (exit code 0).
-      const updateSteps: Array<{ label: string; command: string; args: string[] }> = [
-        { label: 'Pulling latest code',    command: 'git',  args: ['pull']                                       },
-        { label: 'Installing packages',    command: 'npm',  args: ['install', '--prefer-offline']                },
-        { label: 'Compiling TypeScript',   command: 'npm',  args: ['run', 'build']                               },
-        { label: 'Rebuilding launcher',    command: 'npm',  args: ['run', 'build:launcher']                      },
-      ];
-
-      /** Runs one update step. On completion, calls itself recursively for the next step. */
-      function runNextStep(stepIndex: number): void {
-        if (stepIndex >= updateSteps.length) {
-          // All steps finished successfully
+      void downloadAndStagePortableUpdate()
+        .then(({ latestVersion }) => {
+          sendUpdateLog('\u2713 Portable bundle downloaded successfully');
+          sendUpdateLog('\u2713 Update staged in: ' + getStagedPortableUpdateDirectory());
           sendUpdateLog('');
-          sendUpdateLog('\u2705 Update complete! Restart EZTest to use the new version.');
-          clientSocket.emit('update:complete', { success: true });
-          return;
-        }
-
-        const step = updateSteps[stepIndex];
-        sendUpdateLog('\u25B6 ' + step.label + '...');
-
-        const stepProcess = spawn(step.command, step.args, {
-          cwd:   ezTestRootDirectory,
-          // Use shell:true so npm is resolved correctly on Windows
-          shell: true,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        stepProcess.stdout?.on('data', (chunk: Buffer) => {
-          chunk.toString().split('\n').forEach((outputLine) => {
-            const trimmedLine = outputLine.trim();
-            if (trimmedLine) sendUpdateLog(trimmedLine);
+          sendUpdateLog('Close EZTest and launch it again to apply v' + latestVersion + '.');
+          clientSocket.emit('update:complete', {
+            success: true,
+            message: 'Update downloaded and staged. Close EZTest and launch it again to apply v' + latestVersion + '.',
+          });
+        })
+        .catch((updateError: unknown) => {
+          sendUpdateLog('\u274C ' + (updateError as Error).message);
+          clientSocket.emit('update:complete', {
+            success: false,
+            message: 'Update failed — see log above.',
           });
         });
-
-        stepProcess.stderr?.on('data', (chunk: Buffer) => {
-          chunk.toString().split('\n').forEach((errorLine) => {
-            const trimmedLine = errorLine.trim();
-            if (trimmedLine) sendUpdateLog(trimmedLine);
-          });
-        });
-
-        stepProcess.on('close', (exitCode) => {
-          if (exitCode !== 0) {
-            sendUpdateLog('');
-            sendUpdateLog('\u274C Step failed with exit code ' + exitCode + '. Update aborted.');
-            clientSocket.emit('update:complete', { success: false });
-            return;
-          }
-          sendUpdateLog('\u2713 Done');
-          sendUpdateLog('');
-          runNextStep(stepIndex + 1);
-        });
-
-        stepProcess.on('error', (spawnError) => {
-          sendUpdateLog('\u274C Failed to run step: ' + spawnError.message);
-          clientSocket.emit('update:complete', { success: false });
-        });
-      }
-
-      runNextStep(0);
     });
   });
 

@@ -1154,7 +1154,7 @@ export function buildWizardPageHtml(): string {
       document.getElementById('update-banner').style.display = 'none';
     }
 
-    /** Opens the update modal and triggers the install via socket. */
+    /** Opens the update modal and downloads the next portable bundle in the background. */
     function openUpdateModal() {
       dismissUpdateBanner();
       document.getElementById('update-modal-backdrop').style.display = 'flex';
@@ -1808,7 +1808,7 @@ export function buildWizardPageHtml(): string {
       terminal.scrollTop = terminal.scrollHeight;
     });
 
-    // Called when the install chain finishes (success or failure).
+    // Called when the portable bundle download finishes (success or failure).
     socket.on('update:complete', function(data) {
       var spinnerEl = document.getElementById('update-modal-spinner');
       var doneBar   = document.getElementById('update-done-bar');
@@ -1818,10 +1818,10 @@ export function buildWizardPageHtml(): string {
       if (doneMsg) {
         if (data.success) {
           doneMsg.className   = 'run-result-success';
-          doneMsg.textContent = '\u2705 Update installed. Restart EZTest to use the new version.';
+          doneMsg.textContent = data.message || '\u2705 Update downloaded. Restart EZTest to apply it.';
         } else {
           doneMsg.className   = 'run-result-failure';
-          doneMsg.textContent = '\u274C Update failed — see log above.';
+          doneMsg.textContent = data.message || '\u274C Update failed — see log above.';
         }
       }
     });

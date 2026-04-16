@@ -54,7 +54,7 @@ import {
 // ── Constants ──────────────────────────────────────────────────────────────
 
 const SERVER_NAME = 'eztest';
-const SERVER_VERSION = '0.1.1';
+const SERVER_VERSION = '0.1.2';
 
 /** Default cap for component analysis — keeps AI costs predictable. */
 const DEFAULT_MAX_COMPONENTS = 50;
