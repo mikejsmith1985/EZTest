@@ -4,6 +4,7 @@
  * that lets users run EZTest workflows without touching the terminal.
  */
 import { createServer } from 'node:http';
+import { get as httpsGet } from 'node:https';
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -12,7 +13,102 @@ import express from 'express';
 import { Server as SocketIoServer, type Socket as SocketIoSocket } from 'socket.io';
 import { buildWizardPageHtml } from './wizardPage.js';
 
-// ── App-level config types ─────────────────────────────────────────────────────
+// ── GitHub auto-update constants ───────────────────────────────────────────────
+
+/** GitHub repo owner and name for the EZTest releases API. */
+const GITHUB_RELEASES_OWNER = 'mikejsmith1985';
+const GITHUB_RELEASES_REPO  = 'EZTest';
+
+/**
+ * Describes the result of checking GitHub releases for a newer version.
+ * Used by the /api/update/check endpoint.
+ */
+interface UpdateCheckResult {
+  hasUpdate:      boolean;
+  currentVersion: string;
+  latestVersion:  string;
+  releaseUrl:     string;
+}
+
+/**
+ * Fetches the latest release from the EZTest GitHub repo and returns its tag name
+ * and HTML URL. Rejects with an error if the request fails or the response is
+ * malformed. Uses Node's built-in https module — no external dependencies needed.
+ */
+function fetchLatestGithubRelease(): Promise<{ tagName: string; htmlUrl: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const requestOptions = {
+      hostname: 'api.github.com',
+      path:     '/repos/' + GITHUB_RELEASES_OWNER + '/' + GITHUB_RELEASES_REPO + '/releases/latest',
+      headers:  {
+        // GitHub API requires a User-Agent header to accept requests from scripts.
+        'User-Agent': 'EZTest-auto-update/1.0',
+        'Accept':     'application/vnd.github+json',
+      },
+    };
+
+    const request = httpsGet(requestOptions, (response) => {
+      let rawBody = '';
+      response.on('data', (chunk: Buffer) => { rawBody += chunk.toString(); });
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(rawBody) as { tag_name?: string; html_url?: string };
+          if (!parsed.tag_name) {
+            rejectPromise(new Error('GitHub API response missing tag_name'));
+            return;
+          }
+          resolvePromise({ tagName: parsed.tag_name, htmlUrl: parsed.html_url ?? '' });
+        } catch {
+          rejectPromise(new Error('Failed to parse GitHub releases response'));
+        }
+      });
+    });
+
+    request.on('error', (networkError) => rejectPromise(networkError));
+    // Timeout after 5 seconds — update checks should not block the UI from loading.
+    request.setTimeout(5000, () => {
+      request.destroy();
+      rejectPromise(new Error('GitHub releases API request timed out'));
+    });
+  });
+}
+
+/**
+ * Reads the current EZTest version from package.json in the install directory.
+ * Falls back to '0.0.0' if the file cannot be read or the version field is absent.
+ */
+function readCurrentVersion(): string {
+  try {
+    const packageJsonPath = join(process.cwd(), 'package.json');
+    const packageJson     = JSON.parse(readFileSync(packageJsonPath, 'utf-8')) as { version?: string };
+    return packageJson.version ?? '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+/**
+ * Compares two semver-style version strings (e.g. "2.3.1" vs "2.4.0").
+ * Returns true if candidateVersion is strictly greater than currentVersion.
+ * The leading "v" is stripped before comparison so "v2.3.1" and "2.3.1" both work.
+ */
+function isVersionNewer(currentVersion: string, candidateVersion: string): boolean {
+  const normaliseVersion = (versionString: string) =>
+    versionString.replace(/^v/, '').split('.').map(Number);
+
+  const currentParts   = normaliseVersion(currentVersion);
+  const candidateParts = normaliseVersion(candidateVersion);
+
+  for (let partIndex = 0; partIndex < 3; partIndex++) {
+    const currentPart   = currentParts[partIndex]   ?? 0;
+    const candidatePart = candidateParts[partIndex] ?? 0;
+    if (candidatePart > currentPart) return true;
+    if (candidatePart < currentPart) return false;
+  }
+  return false; // versions are equal
+}
+
+
 
 /**
  * Settings EZTest remembers between sessions: which project to use,
@@ -893,6 +989,33 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     res.json({ opened: true, reportPath: reportIndexPath });
   });
 
+  // ── GET /api/update/check — checks GitHub for a newer EZTest release ──────
+  expressApp.get('/api/update/check', (_req, res) => {
+    const currentVersion = readCurrentVersion();
+
+    fetchLatestGithubRelease()
+      .then(({ tagName, htmlUrl }) => {
+        const hasUpdate = isVersionNewer(currentVersion, tagName);
+        const result: UpdateCheckResult = {
+          hasUpdate,
+          currentVersion,
+          latestVersion: tagName.replace(/^v/, ''),
+          releaseUrl:    htmlUrl,
+        };
+        res.json(result);
+      })
+      .catch((checkError: unknown) => {
+        // Non-fatal — the UI simply won't show the update banner if this fails.
+        res.json({
+          hasUpdate:      false,
+          currentVersion,
+          latestVersion:  currentVersion,
+          releaseUrl:     '',
+          error:          (checkError as Error).message,
+        });
+      });
+  });
+
   // ── Socket.io — real-time run streaming ───────────────────────────────────
   socketServer.on('connection', (clientSocket) => {
 
@@ -936,6 +1059,85 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
         // Notify the client there was nothing to cancel — avoids a silent no-op
         clientSocket.emit('run:log', { level: 'warning' as LogLevel, message: 'No active run to cancel.' });
       }
+    });
+
+    // Client asks to install the latest EZTest update.
+    // Runs: git pull → npm install → npm run build → npm run build:launcher
+    // Streams each line of output back as update:log events so the UI can show
+    // a live progress terminal in the update modal.
+    clientSocket.on('update:install', () => {
+      const ezTestRootDirectory = process.cwd();
+
+      const sendUpdateLog = (message: string) => {
+        clientSocket.emit('update:log', { message });
+      };
+
+      sendUpdateLog('Starting EZTest update...');
+      sendUpdateLog('Working directory: ' + ezTestRootDirectory);
+      sendUpdateLog('');
+
+      // Chain: git pull → npm install → npm run build → npm run build:launcher
+      // Each step is run only if the previous one succeeded (exit code 0).
+      const updateSteps: Array<{ label: string; command: string; args: string[] }> = [
+        { label: 'Pulling latest code',    command: 'git',  args: ['pull']                                       },
+        { label: 'Installing packages',    command: 'npm',  args: ['install', '--prefer-offline']                },
+        { label: 'Compiling TypeScript',   command: 'npm',  args: ['run', 'build']                               },
+        { label: 'Rebuilding launcher',    command: 'npm',  args: ['run', 'build:launcher']                      },
+      ];
+
+      /** Runs one update step. On completion, calls itself recursively for the next step. */
+      function runNextStep(stepIndex: number): void {
+        if (stepIndex >= updateSteps.length) {
+          // All steps finished successfully
+          sendUpdateLog('');
+          sendUpdateLog('\u2705 Update complete! Restart EZTest to use the new version.');
+          clientSocket.emit('update:complete', { success: true });
+          return;
+        }
+
+        const step = updateSteps[stepIndex];
+        sendUpdateLog('\u25B6 ' + step.label + '...');
+
+        const stepProcess = spawn(step.command, step.args, {
+          cwd:   ezTestRootDirectory,
+          // Use shell:true so npm is resolved correctly on Windows
+          shell: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+
+        stepProcess.stdout?.on('data', (chunk: Buffer) => {
+          chunk.toString().split('\n').forEach((outputLine) => {
+            const trimmedLine = outputLine.trim();
+            if (trimmedLine) sendUpdateLog(trimmedLine);
+          });
+        });
+
+        stepProcess.stderr?.on('data', (chunk: Buffer) => {
+          chunk.toString().split('\n').forEach((errorLine) => {
+            const trimmedLine = errorLine.trim();
+            if (trimmedLine) sendUpdateLog(trimmedLine);
+          });
+        });
+
+        stepProcess.on('close', (exitCode) => {
+          if (exitCode !== 0) {
+            sendUpdateLog('');
+            sendUpdateLog('\u274C Step failed with exit code ' + exitCode + '. Update aborted.');
+            clientSocket.emit('update:complete', { success: false });
+            return;
+          }
+          sendUpdateLog('\u2713 Done');
+          sendUpdateLog('');
+          runNextStep(stepIndex + 1);
+        });
+
+        stepProcess.on('error', (spawnError) => {
+          sendUpdateLog('\u274C Failed to run step: ' + spawnError.message);
+          clientSocket.emit('update:complete', { success: false });
+        });
+      }
+
+      runNextStep(0);
     });
   });
 

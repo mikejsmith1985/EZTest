@@ -728,6 +728,15 @@ export function buildWizardPageHtml(): string {
        ───────────────────────────────────────────────────────────────────── -->
   <div id="app" style="display:none">
 
+    <!-- Update banner — shown only when a newer EZTest version is available.
+         Lives outside the app-bar so it spans the full width above everything. -->
+    <div id="update-banner" style="display:none; background: linear-gradient(90deg, #1e1b4b 0%, #312e81 100%); border-bottom: 1px solid #4f46e5; padding: 10px 20px; display: none; align-items: center; gap: 12px; font-size: 0.88rem;">
+      <span style="font-size: 1.1em;">&#x1F680;</span>
+      <span id="update-banner-text" style="flex:1; color: #c7d2fe;">EZTest update available</span>
+      <button id="update-install-btn" style="background: #4f46e5; color: #fff; border: none; border-radius: 6px; padding: 6px 16px; font-size: 0.85rem; font-weight: 600; cursor: pointer;">Update Now</button>
+      <button id="update-dismiss-btn" style="background: transparent; color: #818cf8; border: 1px solid #312e81; border-radius: 6px; padding: 6px 12px; font-size: 0.85rem; cursor: pointer;">Later</button>
+    </div>
+
     <!-- App bar -->
     <div class="app-bar">
       <div class="app-bar-brand">&#x26A1; EZ<span>Test</span></div>
@@ -878,6 +887,27 @@ export function buildWizardPageHtml(): string {
           <!-- Shown after a successful test run -->
           <button class="run-action-btn is-secondary" id="open-report-btn" style="display:none" onclick="openPlaywrightReport()">&#128202; Open Report</button>
           <button class="btn-ghost" onclick="closeRunModal()">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Update modal — shown when the user clicks "Update Now" in the banner ──
+       Separate from the run modal so update output never interferes with
+       normal workflow logs. -->
+  <div class="run-modal-backdrop" id="update-modal-backdrop" style="display:none">
+    <div class="run-modal" style="max-width: 680px; width: 95%">
+      <div class="run-modal-header">
+        <span class="run-modal-title" id="update-modal-title">&#x1F680; Updating EZTest</span>
+        <span id="update-modal-spinner" class="run-status-running">
+          <span class="spinner"></span>Working...
+        </span>
+      </div>
+      <div class="run-terminal" id="update-terminal" style="height: 340px; min-height: 200px;"></div>
+      <div class="run-done-bar" id="update-done-bar" style="display:none">
+        <span id="update-done-msg"></span>
+        <div class="run-done-actions">
+          <button class="btn-ghost" onclick="closeUpdateModal()">Close</button>
         </div>
       </div>
     </div>
@@ -1084,6 +1114,59 @@ export function buildWizardPageHtml(): string {
         document.getElementById('project-pill-name').textContent = escapeHtml(scanResult.projectName);
         document.getElementById('project-pill-name').className   = 'project-pill-name';
       }
+
+      // Silently check for updates in the background each time the dashboard opens.
+      // The banner is only shown if a newer version is found — never on error.
+      checkForUpdates();
+    }
+
+    /**
+     * Calls the /api/update/check endpoint and shows the update banner
+     * if the GitHub releases API reports a newer version is available.
+     * Failures are swallowed silently — update checks should never disrupt the UI.
+     */
+    function checkForUpdates() {
+      fetch('/api/update/check')
+        .then(function(r) { return r.json(); })
+        .then(function(updateResult) {
+          if (updateResult.hasUpdate) {
+            showUpdateBanner(updateResult.latestVersion);
+          }
+        })
+        .catch(function() {
+          // Intentionally silent — no network or GitHub API access is not an error.
+        });
+    }
+
+    /**
+     * Shows the update-available banner above the app bar with the new version number.
+     * The banner stays visible until the user clicks "Update Now" or "Later".
+     */
+    function showUpdateBanner(latestVersion) {
+      var bannerEl  = document.getElementById('update-banner');
+      var bannerText = document.getElementById('update-banner-text');
+      bannerText.innerHTML = 'EZTest <strong>v' + escapeHtml(latestVersion) + '</strong> is available \u2014 you\'re running an older version.';
+      bannerEl.style.display = 'flex';
+    }
+
+    /** Hides the update banner without installing. */
+    function dismissUpdateBanner() {
+      document.getElementById('update-banner').style.display = 'none';
+    }
+
+    /** Opens the update modal and triggers the install via socket. */
+    function openUpdateModal() {
+      dismissUpdateBanner();
+      document.getElementById('update-modal-backdrop').style.display = 'flex';
+      document.getElementById('update-terminal').innerHTML = '';
+      document.getElementById('update-done-bar').style.display = 'none';
+      document.getElementById('update-modal-spinner').style.display = '';
+      socket.emit('update:install');
+    }
+
+    /** Closes the update modal. */
+    function closeUpdateModal() {
+      document.getElementById('update-modal-backdrop').style.display = 'none';
     }
 
     /** Renders the stats bar at the top of the dashboard. */
@@ -1712,6 +1795,37 @@ export function buildWizardPageHtml(): string {
       }
     });
 
+    // ── Update socket events ─────────────────────────────────────────────────
+
+    // Streams a single line of update output into the update modal terminal.
+    socket.on('update:log', function(data) {
+      var terminal = document.getElementById('update-terminal');
+      if (!terminal) return;
+      var line = document.createElement('div');
+      line.style.cssText = 'font-family: monospace; font-size: 0.82rem; color: #c9d1d9; padding: 1px 0; white-space: pre-wrap; word-break: break-all;';
+      line.textContent = data.message;
+      terminal.appendChild(line);
+      terminal.scrollTop = terminal.scrollHeight;
+    });
+
+    // Called when the install chain finishes (success or failure).
+    socket.on('update:complete', function(data) {
+      var spinnerEl = document.getElementById('update-modal-spinner');
+      var doneBar   = document.getElementById('update-done-bar');
+      var doneMsg   = document.getElementById('update-done-msg');
+      if (spinnerEl) spinnerEl.style.display = 'none';
+      if (doneBar)   doneBar.style.display   = 'flex';
+      if (doneMsg) {
+        if (data.success) {
+          doneMsg.className   = 'run-result-success';
+          doneMsg.textContent = '\u2705 Update installed. Restart EZTest to use the new version.';
+        } else {
+          doneMsg.className   = 'run-result-failure';
+          doneMsg.textContent = '\u274C Update failed — see log above.';
+        }
+      }
+    });
+
     // ── Utility helpers ───────────────────────────────────────────────────────
 
     /** Escapes HTML special characters to prevent XSS from path/name values. */
@@ -1768,6 +1882,10 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-cancel-btn').addEventListener('click', function() {
         socket.emit('run:cancel');
       });
+
+      // Update banner buttons
+      document.getElementById('update-install-btn').addEventListener('click', openUpdateModal);
+      document.getElementById('update-dismiss-btn').addEventListener('click', dismissUpdateBanner);
 
       // Boot the app
       initApp();
