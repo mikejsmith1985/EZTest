@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-04-25
+
+### Fixed
+- **Blank screen on launch** — The browser UI was completely blank due to two JavaScript syntax errors in the embedded HTML page:
+  1. `showUpdateBanner()` used a single-quoted JS string containing an apostrophe (`you're`), which terminated the string literal early and produced `Uncaught SyntaxError: Unexpected identifier 're'` at startup — crashing the entire page before any UI rendered.
+  2. The MCP setup preset buttons used `\'` escape sequences inside the TypeScript template literal, which resolved to bare `'` in the served HTML, breaking the single-quoted `onclick` attribute strings for all four IDE preset buttons.
+- Both strings are now double-quoted so apostrophes and single-quote sequences are safe.
+
 ## [0.1.3] - 2026-04-25
 
 ### Changed
