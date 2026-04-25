@@ -12,7 +12,7 @@
  */
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
-import type { UserFlow, GeneratedTestFile } from '../shared/types.js';
+import type { UserFlow, GeneratedTestFile, ForgeAppContext, ComponentAnalysis } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
 import {
   buildTestCodeGenerationPrompt,
@@ -89,8 +89,10 @@ async function generateTestForFlow(
   appSpec: string | undefined,
   shouldReviewAssertions: boolean,
   feedbackContext?: string,
+  forgeAppContext?: ForgeAppContext,
+  involvedComponentAnalyses?: ComponentAnalysis[],
 ): Promise<GeneratedTestFile | null> {
-  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec, feedbackContext);
+  const promptMessages = buildTestCodeGenerationPrompt(userFlow, targetAppUrl, appSpec, feedbackContext, forgeAppContext, involvedComponentAnalyses);
 
   let aiResponse;
   try {
@@ -177,6 +179,18 @@ export interface TestGeneratorOptions {
    * Opt-in because it costs an additional AI call across all generated files.
    */
   shouldAuditQuality?: boolean;
+  /**
+   * When present, the target app is a Jira Forge Custom UI app rendered in an iframe.
+   * Injected into test generation prompts to produce iframe-aware test code.
+   */
+  forgeAppContext?: ForgeAppContext;
+  /**
+   * Component analysis results from the CodeAnalyzer stage. When provided, the test
+   * generation prompt includes real element metadata (aria-labels, testIds, handler names)
+   * so the AI writes precise selectors and meaningful assertions instead of falling back
+   * to trivial smoke tests.
+   */
+  componentAnalyses?: ComponentAnalysis[];
 }
 
 /** The result of a complete test generation run. */
@@ -200,11 +214,21 @@ export async function generateTestsForFlows(
   aiClient: AiClient,
   options: TestGeneratorOptions,
 ): Promise<TestGenerationResult> {
-  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, feedbackContext, shouldReviewAssertions, shouldAuditQuality } = options;
+  const { targetAppUrl, outputDirectory, shouldWriteFilesToDisk, appSpec, feedbackContext, shouldReviewAssertions, shouldAuditQuality, forgeAppContext, componentAnalyses } = options;
 
   if (userFlows.length === 0) {
     logWarning('No user flows provided to test generator. Nothing to generate.');
     return { generatedFiles: [], failedFlowCount: 0, totalAssertionCount: 0 };
+  }
+
+  // Build a lookup map from component name → analysis for fast per-flow element resolution.
+  // This lets us pass real element metadata (aria-labels, testIds, handlers) to the test
+  // generation prompt, eliminating the information gap that causes shallow smoke tests.
+  const componentAnalysisLookup = new Map<string, ComponentAnalysis>();
+  if (componentAnalyses) {
+    for (const analysis of componentAnalyses) {
+      componentAnalysisLookup.set(analysis.componentName, analysis);
+    }
   }
 
   // Ensure output directory exists before we start writing files
@@ -225,8 +249,17 @@ export async function generateTestsForFlows(
   const generatedFiles: GeneratedTestFile[] = [];
   let failedFlowCount = 0;
 
-  for (const userFlow of userFlows) {
-    logDebug(`  Generating: ${userFlow.flowName} (${userFlow.flowKind})`);
+  for (let flowIndex = 0; flowIndex < userFlows.length; flowIndex++) {
+    const userFlow = userFlows[flowIndex];
+    // logInfo intentionally (not logDebug) — the "Writing test N/M" pattern is parsed
+    // by the UI progress bar to show per-test progress during generation.
+    logInfo(`  Writing test ${flowIndex + 1}/${userFlows.length}: ${userFlow.flowName}`);
+
+    // Resolve the component analyses for THIS flow's involved components so the
+    // test generation prompt has real element metadata instead of text-only descriptions.
+    const involvedAnalyses = userFlow.involvedComponents
+      .map(componentName => componentAnalysisLookup.get(componentName))
+      .filter((analysis): analysis is ComponentAnalysis => analysis !== undefined);
 
     const generatedFile = await generateTestForFlow(
       userFlow,
@@ -236,6 +269,8 @@ export async function generateTestsForFlows(
       appSpec,
       shouldReviewAssertions,
       feedbackContext,
+      forgeAppContext,
+      involvedAnalyses,
     );
 
     if (!generatedFile) {

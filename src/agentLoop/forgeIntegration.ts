@@ -4,12 +4,11 @@
  *
  * When a bug report arrives, this module:
  * 1. Formats the report into a rich agent prompt
- * 2. Sends it to the Forge Terminal webhook (or writes it to the .forge/hooks directory)
+ * 2. Sends it to Forge Terminal using the best available delivery method:
+ *    a) MCP server (POST /api/mcp with task_submit tool) — preferred
+ *    b) Webhook (POST to forgeTerminalWebhookUrl) — fallback
+ *    c) File (write .forge/pending-tasks/*.md) — last resort
  * 3. The agent picks it up and runs through: failing test → code fix → validation suite
- *
- * The integration supports two delivery modes:
- * - Webhook: POST to a Forge Terminal URL (requires forgeTerminalWebhookUrl in config)
- * - File: Write a .md prompt file to .forge/pending-tasks/ (works without network config)
  */
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -78,6 +77,77 @@ Provide a brief summary of: what the bug was, what caused it, and how it was fix
 // ── Delivery Methods ───────────────────────────────────────────────────────
 
 /**
+ * Delivers the bug report via the Forge Terminal MCP server (task_submit tool).
+ * This is the preferred method — it provides acknowledgement and a task ID.
+ * Returns the task ID on success, or null on failure.
+ */
+async function deliverViaMcp(
+  agentPrompt: string,
+  bugReport: BugReport,
+  mcpUrl: string,
+  mcpToken: string,
+): Promise<string | null> {
+  const rpcRequest = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'task_submit',
+      arguments: {
+        type: 'bug-report',
+        payload: agentPrompt,
+        source: 'eztest-mcp',
+      },
+    },
+  };
+
+  try {
+    const response = await fetch(mcpUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${mcpToken}`,
+      },
+      body: JSON.stringify(rpcRequest),
+    });
+
+    if (!response.ok) {
+      logWarning(`Forge MCP server returned ${response.status}. Falling back.`);
+      return null;
+    }
+
+    const responseBody = await response.json() as {
+      result?: { content?: Array<{ text?: string }> };
+      error?: { message?: string };
+    };
+
+    if (responseBody.error) {
+      logWarning(`Forge MCP error: ${responseBody.error.message ?? 'unknown error'}`);
+      return null;
+    }
+
+    // Parse the task ID from the JSON text content.
+    const contentText = responseBody.result?.content?.[0]?.text ?? '';
+    try {
+      const taskResponse = JSON.parse(contentText) as { taskId?: string };
+      if (taskResponse.taskId) {
+        logSuccess(`Bug report delivered to Forge via MCP — task ID: ${taskResponse.taskId}`);
+        logInfo(`Monitor progress: GET ${mcpUrl}/tasks/${taskResponse.taskId}`);
+        return taskResponse.taskId;
+      }
+    } catch {
+      // Content was not JSON — fall through with a generic success.
+    }
+
+    logSuccess(`Bug report ${bugReport.reportId} delivered to Forge via MCP.`);
+    return 'delivered';
+  } catch (fetchError) {
+    logWarning(`Could not reach Forge MCP server at ${mcpUrl}: ${String(fetchError)}`);
+    return null;
+  }
+}
+
+/**
  * Delivers the agent prompt via HTTP webhook to a running Forge Terminal instance.
  */
 async function deliverViaWebhook(
@@ -140,7 +210,11 @@ function deliverViaFile(
 
 /** Options for sending a bug report to the agent. */
 export interface ForgeIntegrationOptions {
-  /** URL of the Forge Terminal webhook. If not set, file delivery is used. */
+  /** URL of the Forge Terminal MCP server (e.g. http://localhost:3005/api/mcp). Preferred. */
+  mcpUrl?: string;
+  /** Bearer token for the Forge Terminal MCP server (from ~/.forge/mcp-token). */
+  mcpToken?: string;
+  /** URL of the Forge Terminal webhook. Used when MCP URL is not configured. */
   webhookUrl?: string;
   /** The working directory of the target project (where .forge/ lives). */
   projectWorkingDirectory: string;
@@ -151,24 +225,35 @@ export interface ForgeIntegrationOptions {
 /**
  * Sends a BugReport to the Forge Terminal agent using the best available delivery method.
  *
- * This is the bridge between the EZTest recording session and the autonomous
- * agent feedback loop: test generation → code fix → validation.
+ * Priority order:
+ *   1. MCP task_submit (acknowledged, returns task ID) — requires mcpUrl + mcpToken
+ *   2. HTTP webhook (fire-and-forget) — requires webhookUrl
+ *   3. File drop to .forge/pending-tasks/ — always available as last resort
  */
 export async function sendBugReportToForgeAgent(
   bugReport: BugReport,
   options: ForgeIntegrationOptions,
 ): Promise<void> {
-  const { webhookUrl, projectWorkingDirectory, sourceDirectory } = options;
+  const { mcpUrl, mcpToken, webhookUrl, projectWorkingDirectory, sourceDirectory } = options;
 
   const agentPrompt = formatBugReportAsAgentPrompt(bugReport, sourceDirectory);
 
   logDebug(`Sending bug report ${bugReport.reportId} to Forge Terminal agent...`);
 
-  // Try webhook first, fall back to file delivery
+  // Priority 1: MCP task_submit
+  if (mcpUrl && mcpToken) {
+    const taskId = await deliverViaMcp(agentPrompt, bugReport, mcpUrl, mcpToken);
+    if (taskId) return;
+  } else if (mcpUrl) {
+    logWarning('forgeMcpUrl is set but forgeMcpToken is missing — skipping MCP delivery.');
+  }
+
+  // Priority 2: HTTP webhook
   if (webhookUrl) {
     const wasWebhookSuccessful = await deliverViaWebhook(agentPrompt, bugReport, webhookUrl);
     if (wasWebhookSuccessful) return;
   }
 
+  // Priority 3: File fallback
   deliverViaFile(agentPrompt, bugReport, projectWorkingDirectory);
 }

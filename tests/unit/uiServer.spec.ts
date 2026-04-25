@@ -76,6 +76,33 @@ test.describe('uiServer', () => {
     expect(htmlBody).toContain('EZTest');
   });
 
+  test('GET / served HTML has valid JavaScript (no broken regex from template literal escaping)', async () => {
+    const response = await fetch(activeServerInstance.serverUrl + '/');
+    const htmlBody = await response.text();
+
+    // Extract the inline <script> block
+    const scriptMatch = htmlBody.match(/<script>([\s\S]*?)<\/script>/);
+    expect(scriptMatch).not.toBeNull();
+
+    const scriptContent = scriptMatch![1];
+
+    // Confirm all 5 action cards are present — a blank page means cards are missing
+    const cardMatches = htmlBody.match(/class="action-card"/g) ?? [];
+    expect(cardMatches).toHaveLength(5);
+    expect(htmlBody).toContain('Set Up EZTest In My IDE');
+
+    // The most common template-literal escape bug: \d and \s lose their backslash,
+    // turning /(\d+)/ into /(d+)/ in the output. Verify the raw regex chars are correct.
+    // A valid output must contain \d and \s (escaped form), not bare d+ or s+ in regex context.
+    expect(scriptContent).toContain('\\d+');
+    expect(scriptContent).toContain('\\s+');
+
+    // The critical structural check: no unescaped slash mid-regex that would cause
+    // "SyntaxError: Unexpected token" and blank the entire page.
+    // We detect this by ensuring the script does NOT contain the broken pattern.
+    expect(scriptContent).not.toMatch(/logMessage\.match\(\/[^)]*[^\\]\/[^)]*\/[^)]*\)/);
+  });
+
   // ── GET /api/status ──────────────────────────────────────────────────────────
 
   test('GET /api/status returns node version and ok flag', async () => {

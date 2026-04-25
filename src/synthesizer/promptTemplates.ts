@@ -12,7 +12,7 @@
  * 4. Every happy-path flow MUST have a corresponding error-case and edge-case flow
  * 5. The "So What" rule: if an assertion doesn't verify something a user sees, remove it
  */
-import type { ComponentAnalysis, UserFlow } from '../shared/types.js';
+import type { ComponentAnalysis, ForgeAppContext, UserFlow } from '../shared/types.js';
 import type { AiMessage } from '../shared/types.js';
 
 // ── System Prompts ─────────────────────────────────────────────────────────
@@ -67,24 +67,141 @@ EXAMPLES of good assertions (write these instead):
 // ── Max Source Code Characters Per Component ──────────────────────────────
 
 /**
- * How many characters of source code to include per component.
- * Modern AI models support large context windows — 3000 chars was far too small
- * for real components. 8000 chars captures most real-world component files fully.
- * This constant makes the limit easy to adjust without hunting through prompts.
+ * How many characters of source code to include per component in SINGLE-COMPONENT prompts
+ * (e.g., the component intent analysis step). These calls only analyze one component at a
+ * time, so they can afford a much larger excerpt without hitting API token limits.
  */
 const MAX_SOURCE_CHARS_PER_COMPONENT = 8000;
 
+/**
+ * How many characters of source code to include per component when ALL components are
+ * sent together in a BATCH prompt (e.g., user flow generation).
+ *
+ * The GitHub Models API has an 8000-token input limit. With 20-30 components in one call,
+ * each component can only budget ~200-300 tokens of source. At ~4 chars per token, 400 chars
+ * gives the AI enough business context (the component's JSX structure and key handlers)
+ * without blowing the request size limit.
+ *
+ * Quality trade-off: less source context means fewer nuanced insights, but the element list
+ * (which is always fully included) carries most of the actionable signal for flow generation.
+ */
+const MAX_BATCH_SOURCE_CHARS_PER_COMPONENT = 400;
+
 // ── App Spec Injection Helper ──────────────────────────────────────────────
+
+/**
+ * Compact system prompt for the flow-mapping stage.
+ *
+ * The full BEHAVIORAL_QA_SYSTEM_PROMPT is ~875 tokens — too large when combined with
+ * 20+ components and an app spec in a single 8K-token request to GitHub Models.
+ * This prompt conveys the essential instruction (produce JSON flows) in ~150 tokens,
+ * leaving the budget for component data and app spec context where the quality signal is.
+ */
+const FLOW_GENERATION_SYSTEM_PROMPT = `You are a QA engineer mapping application components to user flows.
+Your job: given a list of UI components with their interactive elements, identify the complete set of user journeys to test.
+A user flow is a sequence of actions a real user takes to accomplish a goal across one or more pages.
+Respond ONLY with a valid JSON array. No markdown, no explanation.`;
 
 /**
  * Formats the optional app spec (README / eztest-spec.md) into a prompt section.
  * The app spec is the single biggest quality lever — it gives the AI the business
  * intent of the application, not just what the code does mechanically.
+ *
+ * @param maxChars - Maximum characters to include. Defaults to 2000 (≈500 tokens) which
+ *   keeps the app spec within the 8K-token GitHub Models input limit when combined with
+ *   the flow-generation system prompt and 20-30 component summaries.
  */
-function formatAppSpecSection(appSpec: string | undefined): string {
+function formatAppSpecSection(appSpec: string | undefined, maxChars = 2000): string {
   if (!appSpec) return '';
-  return `\nAPPLICATION SPECIFICATION (what this app is designed to do — use this to understand user goals):
-${appSpec.slice(0, 5000)}
+  return `\nAPP PURPOSE (use this to understand what users are trying to do):
+${appSpec.slice(0, maxChars)}
+
+`;
+}
+
+/**
+ * Formats Forge app context into a flow-generation prompt section.
+ *
+ * When a Jira Forge Custom UI app is detected, the AI must understand that internal
+ * React Router paths like /dashboard are NOT direct URLs. Every user flow starts at
+ * the Jira project page, and navigation happens via nav bar button clicks inside the
+ * iframe — not via page.goto() to different paths.
+ */
+function resolveForgeProjectPageUrl(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const detectedForgeProjectPageUrl = forgeAppContext.forgeProjectPageUrl?.trim();
+  if (!detectedForgeProjectPageUrl) {
+    return '<FORGE_PROJECT_PAGE_URL>';
+  }
+
+  try {
+    return new URL(detectedForgeProjectPageUrl).toString();
+  } catch {
+    // Continue — this is a relative Jira path and needs the configured app URL host.
+  }
+
+  try {
+    return new URL(detectedForgeProjectPageUrl, targetAppUrl).toString();
+  } catch {
+    return detectedForgeProjectPageUrl;
+  }
+}
+
+function formatForgeFlowInstructions(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const pageUrl = resolveForgeProjectPageUrl(forgeAppContext, targetAppUrl);
+  return `
+IMPORTANT — JIRA FORGE APP ARCHITECTURE:
+This application is a Jira Forge Custom UI app rendered inside an iframe in Jira Cloud.
+- Tests CANNOT navigate to internal paths like /dashboard, /dsu-board, /story-pointing — these are React Router paths inside the iframe, not real URLs.
+- ALL flows must start at the single Jira page: "${pageUrl}"
+- Navigation between app views is done by CLICKING nav bar buttons (e.g., a button labeled "Team Health"), NOT by changing URLs.
+- The "startingRoute" in every flow must be "${pageUrl}" — the same URL for all flows.
+- Describe navigation steps as "click the [Tab Name] nav button", not "navigate to /path".
+
+`;
+}
+
+/**
+ * Formats Forge app context into the test code generation prompt.
+ *
+ * Provides mandatory code patterns the AI MUST use for Forge apps.
+ * Without these patterns, tests will fail immediately because they navigate
+ * to internal React Router paths that don't exist as direct browser URLs.
+ */
+function formatForgeTestInstructions(
+  forgeAppContext: ForgeAppContext,
+  targetAppUrl: string,
+): string {
+  const pageUrl = resolveForgeProjectPageUrl(forgeAppContext, targetAppUrl);
+  const iframeSel = forgeAppContext.iframeSelector;
+  return `
+MANDATORY — JIRA FORGE APP: USE THESE EXACT PATTERNS:
+This app renders inside a Jira iframe. You MUST use frameLocator — page.goto('/dashboard') will FAIL.
+
+REQUIRED CONSTANTS (put these at the top of the file, after imports):
+const FORGE_PROJECT_PAGE = '${pageUrl}';
+const IFRAME_LOAD_TIMEOUT_MS = 90_000;
+const TAB_RENDER_TIMEOUT_MS = 30_000;
+
+REQUIRED NAVIGATION PATTERN (use this in every test):
+  await page.goto(FORGE_PROJECT_PAGE);
+  await page.waitForLoadState('load', { timeout: IFRAME_LOAD_TIMEOUT_MS });
+  const vantageFrame = page.frameLocator('${iframeSel}').first();
+  await expect(vantageFrame.locator('nav button').first()).toBeVisible({ timeout: IFRAME_LOAD_TIMEOUT_MS });
+
+TO NAVIGATE TO A VIEW (click nav button, do NOT use page.goto):
+  await vantageFrame.locator('nav button', { hasText: 'Team Health' }).click();
+  await vantageFrame.locator('main').first().waitFor({ state: 'visible', timeout: TAB_RENDER_TIMEOUT_MS });
+
+ALL ASSERTIONS must use vantageFrame, not page:
+  await expect(vantageFrame.getByText(/Sprint/i)).toBeVisible();
+
+DO NOT use page.getByRole() or page.getByText() for app content — it is inside the iframe.
 
 `;
 }
@@ -181,14 +298,23 @@ Only return valid JSON. No markdown fences, no explanation.`,
  * @param appSpec - Optional plain-English description of the app's purpose.
  *   This is the single biggest quality lever — it tells the AI what the app
  *   is SUPPOSED to do, not just what elements exist in the code.
+ * @param forgeAppContext - When provided, adds Jira Forge iframe navigation instructions.
+ *   Forge apps render inside an iframe — flows must use nav tab clicks, not page.goto().
  */
 export function buildUserFlowGenerationPrompt(
   componentAnalyses: ComponentAnalysis[],
   targetAppUrl: string,
   appSpec?: string,
+  forgeAppContext?: ForgeAppContext,
 ): AiMessage[] {
-  // Include richer context per component: elements + key source excerpt
-  // Giving the AI more source context produces dramatically better cross-component flows
+  // In batch flow generation, we send ALL components in one call. Source code is omitted
+  // because including even a small excerpt per component pushes the request past the
+  // GitHub Models 8K-token input limit (system prompt alone is ~700 tokens, plus 26
+  // components × element list = another 1300+ tokens).
+  //
+  // The element list (kind, label, handler name) carries the essential behavioral signal
+  // the AI needs to identify user flows. The app spec (README) provides the business
+  // context that source excerpts were previously approximating.
   const componentSummaries = componentAnalyses
     .map(analysis => {
       const elementList = analysis.interactiveElements
@@ -201,69 +327,96 @@ export function buildUserFlowGenerationPrompt(
         })
         .join('\n');
 
-      // Include a meaningful excerpt of the source to give the AI business context
-      const sourceExcerpt = analysis.sourceCode.slice(0, 1500);
-
       return `### ${analysis.componentName}${analysis.routePath ? ` (route: ${analysis.routePath})` : ''}
 Elements:
-${elementList}
-Source excerpt:
-\`\`\`
-${sourceExcerpt}
-\`\`\``;
+${elementList}`;
     })
     .join('\n\n');
 
   return [
     {
       role: 'system',
-      content: BEHAVIORAL_QA_SYSTEM_PROMPT,
+      // Use the compact prompt — the full BEHAVIORAL_QA_SYSTEM_PROMPT is too long for
+      // batch calls that already carry 20+ components + app spec within the 8K token limit.
+      content: FLOW_GENERATION_SYSTEM_PROMPT,
     },
     {
       role: 'user',
-      content: `Based on these application components, identify the complete set of USER FLOWS to test.
-${formatAppSpecSection(appSpec)}
-BASE URL: ${targetAppUrl}
-
+      content: `Identify all USER FLOWS for this application.
+${formatAppSpecSection(appSpec)}BASE URL: ${targetAppUrl}
+${forgeAppContext ? formatForgeFlowInstructions(forgeAppContext, targetAppUrl) : ''}
 COMPONENTS:
 ${componentSummaries}
 
-A user flow is a sequence of actions a real user takes to accomplish a goal (e.g., "Add item to cart and checkout").
+COVERAGE REQUIREMENTS:
+For EVERY happy-path flow, also generate:
+1. An ERROR-CASE flow: user sees a meaningful error message (bad input, unauthorized, network error)
+2. An EDGE-CASE flow: empty state, boundary value, or already-completed action
 
-MANDATORY COVERAGE REQUIREMENTS:
-For EVERY happy-path flow you identify, you MUST ALSO generate:
-1. At least one ERROR-CASE flow: what happens when the action fails? (bad input, unauthorized, network error, server error)
-   → The user MUST see a meaningful error message — not a blank screen or a JavaScript exception
-2. At least one EDGE-CASE flow: empty state, boundary value, duplicate action, already-completed action
-   → These catch the bugs that happy-path testing misses
+Return a JSON array. Each item:
+{"flowName":"verb-first name","startingRoute":"/path","flowKind":"happy-path"|"error-case"|"edge-case","steps":[{"stepDescription":"what user does","targetElementDescription":"element name","expectedOutcome":"what user sees","isNavigation":true/false}],"involvedComponents":["Name"],"testPriority":"critical"|"high"|"medium"}
 
-Flows that only test success scenarios are INCOMPLETE and will be rejected.
-
-Respond with a JSON array of user flows. Each flow:
-{
-  "flowName": "verb-first description of what the user accomplishes",
-  "startingRoute": "/path where this flow begins",
-  "flowKind": "happy-path" | "error-case" | "edge-case",
-  "steps": [
-    {
-      "stepDescription": "what the user does",
-      "targetElementDescription": "which element they interact with (human-readable, not CSS)",
-      "expectedOutcome": "what the user SEES AFTER this step completes — be specific about visible text, element state, or URL",
-      "isNavigation": true/false
-    }
-  ],
-  "involvedComponents": ["ComponentName1", "ComponentName2"],
-  "testPriority": "critical" | "high" | "medium"
-}
-
-Generate:
-- ALL critical happy-path flows (the main purpose of the app)
-- A corresponding error-case flow for EVERY happy-path flow
-- Key edge cases (empty state, validation, boundary conditions, duplicate actions)
-
-Only return a valid JSON array. No markdown, no explanation.`,
+Only return valid JSON array.`,
     },
   ];
+}
+
+// ── Element Context for Test Generation ────────────────────────────────────
+
+/**
+ * Maximum characters of source code per component included in the test generation prompt.
+ * Test generation runs one flow at a time (not batched), so we can afford more context
+ * than flow generation. This gives the AI enough JSX structure to understand the DOM.
+ */
+const MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT = 3000;
+
+/**
+ * Builds a section describing the actual interactive elements available in the components
+ * involved in a user flow. This gives the test-writing AI concrete selectors (aria-labels,
+ * test IDs, text content, element roles) instead of forcing it to guess from text descriptions.
+ *
+ * Without this context, the AI falls back to trivial "page loads" assertions because it
+ * cannot know what DOM elements actually exist or what selectors will locate them.
+ */
+function buildElementContextSection(involvedComponentAnalyses: ComponentAnalysis[]): string {
+  if (involvedComponentAnalyses.length === 0) return '';
+
+  const componentSections = involvedComponentAnalyses.map(analysis => {
+    const elementDescriptions = analysis.interactiveElements.map(element => {
+      const parts = [`  - ${element.elementKind.toUpperCase()}`];
+      if (element.textContent) parts.push(`text: "${element.textContent}"`);
+      if (element.ariaLabel) parts.push(`aria-label: "${element.ariaLabel}"`);
+      if (element.testId) parts.push(`testId: "${element.testId}"`);
+      if (element.handlerName) parts.push(`handler: ${element.handlerName}`);
+      if (element.classNames?.length) parts.push(`classes: [${element.classNames.join(', ')}]`);
+      return parts.join(', ');
+    }).join('\n');
+
+    // Include a truncated source excerpt so the AI sees the JSX structure
+    const sourceExcerpt = analysis.sourceCode.length > MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT
+      ? analysis.sourceCode.slice(0, MAX_TEST_GEN_SOURCE_CHARS_PER_COMPONENT) + '\n[...truncated]'
+      : analysis.sourceCode;
+
+    return `### ${analysis.componentName}${analysis.routePath ? ` (route: ${analysis.routePath})` : ''}
+Elements:
+${elementDescriptions}
+
+Source excerpt:
+\`\`\`tsx
+${sourceExcerpt}
+\`\`\``;
+  }).join('\n\n');
+
+  return `
+AVAILABLE INTERACTIVE ELEMENTS (these are the REAL elements in the DOM — use them for precise selectors):
+${componentSections}
+
+SELECTOR STRATEGY — use the element metadata above to write PRECISE locators:
+- If an element has an aria-label → getByLabel("exact aria-label value")
+- If an element has a testId → getByTestId("testId value")
+- If an element has visible text → getByRole('button', { name: 'visible text' }) or getByText('visible text')
+- NEVER guess selectors — if you cannot find a matching element above, use the most specific text match available
+`;
 }
 
 // ── Test Code Generation Prompt ────────────────────────────────────────────
@@ -275,18 +428,35 @@ Only return a valid JSON array. No markdown, no explanation.`,
  *
  * @param appSpec - Optional plain-English app description. When present, the AI can use
  *   it to resolve ambiguity about what the "correct" expected outcome is.
+ * @param forgeAppContext - When provided, adds mandatory Forge iframe navigation patterns.
+ *   Without this context, Forge app tests will navigate to wrong URLs and fail immediately.
+ * @param involvedComponentAnalyses - Component analyses for the components involved in this
+ *   flow. Provides the AI with real element metadata (aria-labels, testIds, text, handlers)
+ *   so it can write precise selectors instead of guessing and falling back to smoke tests.
  */
 export function buildTestCodeGenerationPrompt(
   userFlow: UserFlow,
   targetAppUrl: string,
   appSpec?: string,
   feedbackContext?: string,
+  forgeAppContext?: ForgeAppContext,
+  involvedComponentAnalyses?: ComponentAnalysis[],
 ): AiMessage[] {
   const stepsDescription = userFlow.steps
-    .map((step, stepIndex) => `Step ${stepIndex + 1}: ${step.actionDescription}
-  → Expected visible outcome: ${step.expectedOutcome}
-  → Navigation: ${step.isNavigation ? 'yes (URL changes)' : 'no'}`)
+    .map((step, stepIndex) => {
+      let description = `Step ${stepIndex + 1}: ${step.actionDescription}`;
+      if (step.targetElementDescription) {
+        description += `\n  → Target element: ${step.targetElementDescription}`;
+      }
+      description += `\n  → Expected visible outcome: ${step.expectedOutcome}`;
+      description += `\n  → Navigation: ${step.isNavigation ? 'yes (URL changes)' : 'no'}`;
+      return description;
+    })
     .join('\n');
+
+  const elementContext = involvedComponentAnalyses && involvedComponentAnalyses.length > 0
+    ? buildElementContextSection(involvedComponentAnalyses)
+    : '';
 
   return [
     {
@@ -301,20 +471,28 @@ FLOW: ${userFlow.flowName}
 KIND: ${userFlow.flowKind}
 BASE URL: ${targetAppUrl}
 STARTING PATH: ${userFlow.startingUrl}
-
+${forgeAppContext ? formatForgeTestInstructions(forgeAppContext, targetAppUrl) : ''}${elementContext}
 STEPS:
 ${stepsDescription}
 
 REQUIREMENTS:
 1. Import from @playwright/test only — no application source imports
 2. Use page.getByRole(), page.getByLabel(), page.getByText(), page.getByPlaceholder() for locators
-3. EVERY step must have at least one expect() assertion on what the user SEES — not what code executes
+3. EVERY step MUST have at least one expect() assertion on what the user SEES — not what code executes
 4. Use await expect(locator).toBeVisible() / toHaveText() / toBeEnabled() / toHaveURL() etc.
 5. Do NOT use page.waitForTimeout() — let Playwright auto-wait
 6. For error-case flows: assert the error message is VISIBLE and READABLE to the user
 7. For edge-case flows: assert the graceful handling is visible (empty state message, disabled button, etc.)
 8. Include a descriptive test name that describes the USER OUTCOME, not the technical operation
 9. Apply the SO WHAT rule to every assertion: if the user wouldn't notice it, remove it
+
+CRITICAL — DO NOT WRITE SMOKE TESTS:
+- A test that ONLY navigates to a page and checks "something is visible" is WORTHLESS
+- Every test MUST interact with at least one element (click a button, fill a form, select an option)
+- Every test MUST assert on a SPECIFIC outcome (exact text, specific element state, URL change) — not just "page has content"
+- If the flow says "user clicks Submit", the test MUST click the Submit button AND assert on what happens AFTER
+- Regex matchers like /Submit|Cancel|Loading/i that match ANY of several unrelated words are FORBIDDEN — assert on the SPECIFIC expected text
+- A test that passes when the feature is completely broken is worse than no test at all
 
 Output ONLY the complete TypeScript test file content. No explanation, no markdown fences.
 The file should be ready to run with \`playwright test\`.${feedbackContext ? `\n\n${feedbackContext}` : ''}`,

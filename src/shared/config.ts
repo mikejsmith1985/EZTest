@@ -28,6 +28,10 @@ export interface EZTestConfig {
   isVerboseLogging: boolean;
   /** Forge Terminal webhook URL for agent feedback loop integration */
   forgeTerminalWebhookUrl?: string;
+  /** Forge Terminal MCP server URL (preferred over webhook when set) */
+  forgeMcpUrl?: string;
+  /** Bearer token for the Forge Terminal MCP server (from ~/.forge/mcp-token) */
+  forgeMcpToken?: string;
 }
 
 /** AI provider configuration. */
@@ -51,8 +55,12 @@ const DEFAULT_ANNOTATION_SERVER_PORT = 7432;
 /** How many tokens we allow per AI call — balances cost vs. completeness. */
 const DEFAULT_MAX_TOKENS_PER_CALL = 4096;
 
-/** Number of retry attempts for transient AI API failures. */
-const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
+/**
+ * Number of retry attempts for transient AI API failures.
+ * Set to 5 because the Copilot API intermittently returns 403 under load and
+ * typically succeeds within 2-4 retries with exponential backoff.
+ */
+const DEFAULT_MAX_RETRY_ATTEMPTS = 5;
 
 const DEFAULT_CONFIG: EZTestConfig = {
   ai: {
@@ -150,31 +158,81 @@ function loadCommonJsConfigOverrides(configFilePath: string): Partial<EZTestConf
 // ── Environment Variable Reading ───────────────────────────────────────────
 
 /**
+ * Maps each AI provider name to the environment variable that holds its API key.
+ * Used for both key lookup and provider validation.
+ */
+const PROVIDER_KEY_ENV_VARS: Record<AiProviderName, string> = {
+  openai:    'OPENAI_API_KEY',
+  anthropic: 'ANTHROPIC_API_KEY',
+  github:    'EZTEST_GITHUB_TOKEN',
+  // Copilot provider uses the same GitHub token — the difference is the endpoint
+  // (api.githubcopilot.com instead of models.inference.ai.azure.com) and auth flow.
+  copilot:   'EZTEST_GITHUB_TOKEN',
+};
+
+/**
+ * Returns the API key value for a given provider, or null if not set.
+ * Also checks GITHUB_MODELS_TOKEN as a fallback for the github provider.
+ */
+function resolveApiKeyForProvider(provider: AiProviderName): string | null {
+  if (provider === 'github') {
+    return process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'] ?? null;
+  }
+  const envVarName = PROVIDER_KEY_ENV_VARS[provider];
+  return process.env[envVarName] ?? null;
+}
+
+/**
  * Reads AI configuration from environment variables.
- * Environment variables always take precedence over config file values for security.
+ *
+ * Priority order (later wins):
+ *   1. OPENAI_API_KEY present → provider=openai
+ *   2. ANTHROPIC_API_KEY present → provider=anthropic
+ *   3. EZTEST_GITHUB_TOKEN / GITHUB_MODELS_TOKEN present → provider=github
+ *   4. EZTEST_AI_PROVIDER explicit → ONLY applied when the matching API key is also set.
+ *      This prevents a stale EZTEST_AI_PROVIDER=openai from overriding a live GitHub token
+ *      when the user has no OpenAI key configured.
  */
 function readAiConfigFromEnvironment(): Partial<AiConfig> {
   const environmentOverrides: Partial<AiConfig> = {};
 
-  // Determine provider from which API key is set, if not explicitly configured
+  // Step 1–3: Provider inferred from which keys are present
   if (process.env['OPENAI_API_KEY']) {
     environmentOverrides.apiKey = process.env['OPENAI_API_KEY'];
     environmentOverrides.provider = 'openai';
   }
   if (process.env['ANTHROPIC_API_KEY']) {
-    // Anthropic key takes precedence if both are set — user can override in config
     environmentOverrides.apiKey = process.env['ANTHROPIC_API_KEY'];
     environmentOverrides.provider = 'anthropic';
   }
-  if (process.env['EZTEST_GITHUB_TOKEN'] || process.env['GITHUB_MODELS_TOKEN']) {
-    // GitHub Copilot subscription (GitHub Models API) takes highest precedence —
-    // most users will have this via their Copilot subscription and won't need a paid API key
+  if (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN']) {
+    // GitHub Copilot (via GitHub Models API) takes highest precedence among key-based detection —
+    // most users will have this via their Copilot subscription without needing a paid API key
     environmentOverrides.apiKey = (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])!;
     environmentOverrides.provider = 'github';
   }
+
+  // Step 4: Explicit provider override — only honoured when the matching key is available.
+  // A stale EZTEST_AI_PROVIDER=openai (e.g. written by a previous UI config session) must NOT
+  // override a valid GitHub token. If the user truly wants to switch providers they must also
+  // have the matching API key present.
   if (process.env['EZTEST_AI_PROVIDER']) {
-    environmentOverrides.provider = process.env['EZTEST_AI_PROVIDER'] as AiProviderName;
+    const requestedProvider = process.env['EZTEST_AI_PROVIDER'] as AiProviderName;
+    const matchingApiKey = resolveApiKeyForProvider(requestedProvider);
+    if (matchingApiKey) {
+      environmentOverrides.apiKey = matchingApiKey;
+      environmentOverrides.provider = requestedProvider;
+    }
+    // copilot provider authenticates via `gh auth token` — no env var key needed.
+    // Set a sentinel apiKey so the AiClient initialize() guard doesn't reject it.
+    if (requestedProvider === 'copilot') {
+      environmentOverrides.apiKey  = 'copilot-via-gh-cli';
+      environmentOverrides.provider = 'copilot';
+    }
+    // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
+    // whatever provider/key was detected from the keys that ARE present.
   }
+
   if (process.env['EZTEST_AI_MODEL']) {
     environmentOverrides.modelOverride = process.env['EZTEST_AI_MODEL'];
   }
@@ -211,6 +269,11 @@ export function loadConfig(workingDirectory: string = process.cwd()): EZTestConf
       // Environment variables always win over config file for AI settings
       ...environmentAiOverrides,
     },
+    // MCP config: environment variables override config file values.
+    forgeMcpUrl: process.env['EZTEST_FORGE_MCP_URL'] ?? fileOverrides.forgeMcpUrl,
+    forgeMcpToken: process.env['EZTEST_FORGE_MCP_TOKEN'] ?? fileOverrides.forgeMcpToken,
+    forgeTerminalWebhookUrl:
+      process.env['EZTEST_FORGE_WEBHOOK_URL'] ?? fileOverrides.forgeTerminalWebhookUrl,
   };
 
   // Validate that we have an API key before any AI operation is attempted
@@ -222,16 +285,92 @@ export function loadConfig(workingDirectory: string = process.cwd()): EZTestConf
   return mergedConfig;
 }
 
+// ── GitHub Models Free-Tier Rotation ──────────────────────────────────────
+
+/**
+ * Ordered list of GitHub Models free-tier model IDs used for automatic rotation.
+ * When a model exhausts its daily quota, EZTest automatically tries the next model
+ * in this list so test generation can continue uninterrupted.
+ *
+ * Ordering rationale (quality first, then by tier):
+ *   - HIGH tier (50 req/day): OpenAI > Meta Llama > DeepSeek > AI21 > Cohere
+ *   - LOW  tier (150 req/day): OpenAI mini/nano > Mistral > Phi
+ *   - CUSTOM tier (12 req/day, Copilot Pro only): gpt-5-mini as final OpenAI fallback
+ *
+ * Excluded: premium `custom` tier models (gpt-5, o1, o3, DeepSeek-R1, Grok-3),
+ * embedding-only models, and vision-specialist models unlikely to produce valid JSON.
+ *
+ * Tip: `low` tier models have 3× the daily quota of `high` tier models, so
+ * gpt-4.1-mini and gpt-4o-mini often have quota available when gpt-4.1 and gpt-4o do not.
+ */
+export const GITHUB_FREE_MODEL_ROTATION: readonly string[] = [
+  // ── HIGH tier — OpenAI (50 req/day, best JSON schema adherence) ──────────
+  'gpt-4.1',        // newest GPT-4 flagship — best coding + instruction following
+  'gpt-4o',         // proven EZTest default — strong behavioral test generation
+  // ── LOW tier — OpenAI (150 req/day, generous quota) ─────────────────────
+  'gpt-4.1-mini',   // excellent quality-to-quota ratio
+  'gpt-4o-mini',    // solid fallback with high request volume
+  // ── HIGH tier — Meta Llama (50 req/day, strong instruction following) ────
+  'Llama-3.3-70B-Instruct',              // Meta's best instruction model
+  'Llama-4-Scout-17B-16E-Instruct',      // 10M token context window
+  'Llama-4-Maverick-17B-128E-Instruct-FP8', // strong multimodal reasoning
+  'Meta-Llama-3.1-405B-Instruct',        // very large parameter count, highly capable
+  // ── HIGH tier — DeepSeek (50 req/day, excellent code generation) ─────────
+  'DeepSeek-V3-0324',
+  // ── HIGH tier — AI21 Labs (50 req/day, 256K context window) ─────────────
+  'AI21-Jamba-1.5-Large',
+  // ── HIGH tier — Cohere (50 req/day, optimised for tool use and RAG) ─────
+  'Cohere-command-r-plus-08-2024',
+  // ── LOW tier — Mistral (150 req/day, code-focused models) ────────────────
+  'mistral-medium-2505',   // Mistral Medium 3 — good general purpose
+  'Codestral-2501',        // code-specialized model designed for programming tasks
+  'mistral-small-2503',    // Mistral Small 3.1 — lightweight and fast
+  // ── LOW tier — Cohere (150 req/day) ──────────────────────────────────────
+  'cohere-command-a',
+  // ── LOW tier — Microsoft Phi (150 req/day, note: Phi-4 has 16K context) ─
+  'Phi-4',                 // strong reasoning; context window is 16K (usually adequate)
+  'Phi-4-mini-instruct',   // very lightweight fallback
+  // ── LOW tier — last resort (150 req/day) ─────────────────────────────────
+  'gpt-4.1-nano',
+  // ── CUSTOM tier — Copilot Pro only (12 req/day) ──────────────────────────
+  // Placed last because the 12 req/day quota is very small; only used when
+  // all other models are already exhausted for the day.
+  'gpt-5-mini',
+] as const;
+
 /**
  * Returns the default AI model name for a given provider.
  * These are the best models for code analysis and test generation as of this writing.
+ * For GitHub Models, the default is the first model in the free-tier rotation list.
  */
 export function getDefaultModelForProvider(provider: AiProviderName): string {
   const modelMap: Record<AiProviderName, string> = {
-    openai: 'gpt-4o',
+    openai:    'gpt-4o',
     anthropic: 'claude-3-5-sonnet-20241022',
-    // GitHub Models API (Copilot subscription) — gpt-4o gives the best behavioral test quality
-    github: 'gpt-4o',
+    // GitHub Models API — start with gpt-4.1, then rotate through GITHUB_FREE_MODEL_ROTATION
+    github:    GITHUB_FREE_MODEL_ROTATION[0],
+    // Copilot API — gpt-4.1 is 0x premium requests and has proven JSON reliability
+    copilot:   COPILOT_FREE_MODEL_ROTATION[0],
   };
   return modelMap[provider];
 }
+
+// ── GitHub Copilot API Free-Tier Rotation ──────────────────────────────────
+
+/**
+ * Ordered list of Copilot API model IDs for the model rotation.
+ * gpt-4.1 and gpt-5-mini are 0x premium (free) for Copilot Pro/Pro+ subscribers.
+ * Additional models consume premium requests but serve as robust fallbacks.
+ *
+ * Ordering rationale:
+ *   - gpt-4.1 first: proven JSON reliability, best code analysis, 0x premium
+ *   - gpt-5-mini second: newer architecture, 0x premium
+ *   - gpt-5.4-mini third: strong quality at 0.33x premium cost
+ *   - claude-sonnet-4.6 fourth: excellent code generation at 1x premium
+ */
+export const COPILOT_FREE_MODEL_ROTATION: readonly string[] = [
+  'gpt-4.1',           // 0x — flagship code model, proven JSON + instruction following
+  'gpt-5-mini',        // 0x — newer architecture, good fallback
+  'gpt-5.4-mini',      // 0.33x — strong quality, low premium cost
+  'claude-sonnet-4.6', // 1x — excellent code generation fallback
+] as const;
