@@ -1145,7 +1145,7 @@ export function buildWizardPageHtml(): string {
     function showUpdateBanner(latestVersion) {
       var bannerEl  = document.getElementById('update-banner');
       var bannerText = document.getElementById('update-banner-text');
-      bannerText.innerHTML = 'EZTest <strong>v' + escapeHtml(latestVersion) + '</strong> is available \u2014 you\'re running an older version.';
+      bannerText.innerHTML = "EZTest <strong>v" + escapeHtml(latestVersion) + "</strong> is available \u2014 you're running an older version.";
       bannerEl.style.display = 'flex';
     }
 
@@ -1419,10 +1419,10 @@ export function buildWizardPageHtml(): string {
         + '<div class="mcp-step-card"><div class="mcp-step-number">3</div><div><div class="mcp-step-title">Paste and save</div><div class="mcp-step-body">Put it in the file shown below, or run the command if you picked Claude Code.</div></div></div>'
         + '</div>'
         + '<div class="mcp-preset-row">'
-        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-vscode" onclick="renderSelectedMcpPreset(\'vscode\')">VS Code</button>'
-        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-cursor" onclick="renderSelectedMcpPreset(\'cursor\')">Cursor</button>'
-        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-windsurf" onclick="renderSelectedMcpPreset(\'windsurf\')">Windsurf</button>'
-        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-claude" onclick="renderSelectedMcpPreset(\'claude\')">Claude Code</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-vscode" onclick="renderSelectedMcpPreset(&apos;vscode&apos;)">VS Code</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-cursor" onclick="renderSelectedMcpPreset(&apos;cursor&apos;)">Cursor</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-windsurf" onclick="renderSelectedMcpPreset(&apos;windsurf&apos;)">Windsurf</button>'
+        + '<button type="button" class="mcp-preset-btn" id="mcp-preset-claude" onclick="renderSelectedMcpPreset(&apos;claude&apos;)">Claude Code</button>'
         + '</div>'
         + '<div class="config-input-row">'
         + '<label>Paste this into</label>'

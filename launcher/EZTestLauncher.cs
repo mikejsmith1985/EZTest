@@ -14,8 +14,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("EZTest Project")]
 [assembly: AssemblyProduct("EZTest")]
 [assembly: AssemblyCopyright("Copyright \u00a9 2026 EZTest Project")]
-[assembly: AssemblyVersion("0.1.3.0")]
-[assembly: AssemblyFileVersion("0.1.3.0")]
+[assembly: AssemblyVersion("0.1.4.0")]
+[assembly: AssemblyFileVersion("0.1.4.0")]
 
 // EZTest Windows launcher — starts the portable bundle from any extracted folder
 // and applies previously downloaded updates before opening the browser UI.
