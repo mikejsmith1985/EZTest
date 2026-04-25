@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   1. `showUpdateBanner()` used a single-quoted JS string containing an apostrophe (`you're`), which terminated the string literal early and produced `Uncaught SyntaxError: Unexpected identifier 're'` at startup — crashing the entire page before any UI rendered.
   2. The MCP setup preset buttons used `\'` escape sequences inside the TypeScript template literal, which resolved to bare `'` in the served HTML, breaking the single-quoted `onclick` attribute strings for all four IDE preset buttons.
 - Both strings are now double-quoted so apostrophes and single-quote sequences are safe.
+- **'C:\\Program' is not recognized** — When Node.js is installed in a path containing spaces (e.g. `C:\Program Files\nodejs\node.exe`), spawning it with `shell: true` caused cmd.exe to split the unquoted path at the space and fail with `'C:\Program' is not recognized as an internal or external command`. Fixed by auto-detecting absolute-path commands and spawning them with `shell: false`. Short names like `npx` and `tsx` continue using `shell: true` for Windows PATH resolution.
 
 ## [0.1.3] - 2026-04-25
 
