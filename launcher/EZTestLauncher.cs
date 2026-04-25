@@ -1,9 +1,21 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Reflection;
 using System.Threading;
 using System.Windows.Forms;
+
+// Assembly metadata — embedded into the PE header so Windows and AV engines
+// can verify this is a known, versioned application rather than an anonymous binary.
+[assembly: AssemblyTitle("EZTest")]
+[assembly: AssemblyDescription("AI-powered Playwright test generation companion")]
+[assembly: AssemblyCompany("EZTest Project")]
+[assembly: AssemblyProduct("EZTest")]
+[assembly: AssemblyCopyright("Copyright \u00a9 2026 EZTest Project")]
+[assembly: AssemblyVersion("0.1.3.0")]
+[assembly: AssemblyFileVersion("0.1.3.0")]
 
 // EZTest Windows launcher — starts the portable bundle from any extracted folder
 // and applies previously downloaded updates before opening the browser UI.
@@ -15,6 +27,16 @@ public class EZTestLauncher
     private const string UpdatesDirectoryName = "updates";
     private const string PendingUpdateDirectoryName = "pending-portable-update";
     private const string FailedUpdateMarkerFileName = "last-update-error.txt";
+
+    // Files and directories owned by the portable bundle that the updater replaces.
+    // Kept as typed separate lists so rollback logic never needs to guess whether
+    // a backed-up item was a file or a directory.
+    private static readonly string[] ManagedFileNames = {
+        "EZTest.exe", "node.exe", "package.json", "package-lock.json",
+        "README.md", "CHANGELOG.md", ".env.example",
+    };
+
+    private static readonly string[] ManagedDirectoryNames = { "dist", "node_modules" };
 
     [STAThread]
     public static void Main()
@@ -29,9 +51,14 @@ public class EZTestLauncher
             return;
         }
 
+        // Remove .rollback items left by the previous successful update.
+        // The old EZTest.exe process couldn't delete its own in-use binary, so the
+        // new process (this launch) cleans up on its first run.
+        CleanupRollbackFiles(rootDirectory);
+
         ShowPendingUpdateFailureIfPresent(rootDirectory);
 
-        if (TryApplyPendingUpdateAndExit(rootDirectory, launcherPath))
+        if (TryApplyPendingUpdate(rootDirectory, launcherPath))
         {
             return;
         }
@@ -288,90 +315,187 @@ public class EZTestLauncher
             "EZTest — Update Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
     }
 
-    private static bool TryApplyPendingUpdateAndExit(string rootDirectory, string launcherPath)
+    // CleanupRollbackFiles deletes any .rollback items left over from the previous
+    // successful update. The process that applied that update could not delete its own
+    // in-use EZTest.exe, so cleanup is deferred to this (new) launch.
+    private static void CleanupRollbackFiles(string rootDirectory)
     {
-        string pendingUpdateDirectory = Path.Combine(
+        foreach (string fileName in ManagedFileNames)
+        {
+            string rollbackPath = Path.Combine(rootDirectory, fileName + ".rollback");
+            try { File.Delete(rollbackPath); } catch { }
+        }
+
+        foreach (string dirName in ManagedDirectoryNames)
+        {
+            string rollbackPath = Path.Combine(rootDirectory, dirName + ".rollback");
+            try
+            {
+                if (Directory.Exists(rollbackPath))
+                {
+                    Directory.Delete(rollbackPath, recursive: true);
+                }
+            }
+            catch { }
+        }
+    }
+
+    // TryApplyPendingUpdate applies a staged portable update using only native .NET
+    // file operations — no PowerShell scripts, no temp files, no child processes.
+    //
+    // On Windows, File.Move on a running EXE succeeds because NTFS tracks the
+    // directory entry (name) separately from the open file handle. Renaming the
+    // current EZTest.exe to EZTest.exe.rollback is safe; the running process keeps
+    // its original file handle while the new binary is placed at the same path.
+    private static bool TryApplyPendingUpdate(string rootDirectory, string launcherPath)
+    {
+        string pendingUpdateDir = Path.Combine(
             rootDirectory,
             UpdatesDirectoryName,
             PendingUpdateDirectoryName);
 
-        if (!IsEzTestBundleDirectory(pendingUpdateDirectory))
+        if (!IsEzTestBundleDirectory(pendingUpdateDir))
         {
             return false;
         }
 
-        string tempScriptPath = Path.Combine(
-            Path.GetTempPath(),
-            "eztest-apply-update-" + Guid.NewGuid().ToString("N") + ".ps1");
-
-        File.WriteAllText(
-            tempScriptPath,
-            BuildPendingUpdateScriptContent(rootDirectory, pendingUpdateDirectory, launcherPath));
-
-        var updateScriptProcess = new Process();
-        updateScriptProcess.StartInfo.FileName = "powershell.exe";
-        updateScriptProcess.StartInfo.Arguments =
-            "-NoProfile -ExecutionPolicy Bypass -File \"" + tempScriptPath + "\"";
-        updateScriptProcess.StartInfo.WorkingDirectory = rootDirectory;
-        updateScriptProcess.StartInfo.UseShellExecute = false;
-        updateScriptProcess.StartInfo.CreateNoWindow = true;
-        updateScriptProcess.Start();
-
-        return true;
-    }
-
-    private static string BuildPendingUpdateScriptContent(
-        string rootDirectory,
-        string pendingUpdateDirectory,
-        string launcherPath)
-    {
-        string failedUpdateMarkerPath = Path.Combine(
+        string errorMarkerPath = Path.Combine(
             rootDirectory,
             UpdatesDirectoryName,
             FailedUpdateMarkerFileName);
 
-        return
-            "$managedItems = @('dist', 'node_modules', 'EZTest.exe', 'node.exe', 'package.json', 'package-lock.json', 'README.md', 'CHANGELOG.md', '.env.example')\r\n" +
-            "$rollbackItems = @()\r\n" +
-            "Start-Sleep -Seconds 2\r\n" +
-            "try {\r\n" +
-            "  Remove-Item -LiteralPath '" + EscapePowerShellString(failedUpdateMarkerPath) + "' -Force -ErrorAction SilentlyContinue\r\n" +
-            "  foreach ($managedItem in $managedItems) {\r\n" +
-            "    $sourcePath = Join-Path '" + EscapePowerShellString(rootDirectory) + "' $managedItem\r\n" +
-            "    $rollbackPath = Join-Path '" + EscapePowerShellString(rootDirectory) + "' ($managedItem + '.rollback')\r\n" +
-            "    if (Test-Path -LiteralPath $rollbackPath) { Remove-Item -LiteralPath $rollbackPath -Recurse -Force }\r\n" +
-            "    if (Test-Path -LiteralPath $sourcePath) {\r\n" +
-            "      Move-Item -LiteralPath $sourcePath -Destination $rollbackPath -Force\r\n" +
-            "      $rollbackItems += @{ SourcePath = $sourcePath; RollbackPath = $rollbackPath }\r\n" +
-            "    }\r\n" +
-            "  }\r\n" +
-            "  robocopy '" + EscapePowerShellString(pendingUpdateDirectory) + "' '" + EscapePowerShellString(rootDirectory) + "' /E /NFL /NDL /NJH /NJS /NP > $null\r\n" +
-            "  if ($LASTEXITCODE -ge 8) { throw ('robocopy failed with exit code ' + $LASTEXITCODE) }\r\n" +
-            "  foreach ($rollbackItem in $rollbackItems) {\r\n" +
-            "    if (Test-Path -LiteralPath $rollbackItem.RollbackPath) {\r\n" +
-            "      Remove-Item -LiteralPath $rollbackItem.RollbackPath -Recurse -Force\r\n" +
-            "    }\r\n" +
-            "  }\r\n" +
-            "  Remove-Item -LiteralPath '" + EscapePowerShellString(pendingUpdateDirectory) + "' -Recurse -Force -ErrorAction SilentlyContinue\r\n" +
-            "}\r\n" +
-            "catch {\r\n" +
-            "  foreach ($rollbackItem in $rollbackItems) {\r\n" +
-            "    if (Test-Path -LiteralPath $rollbackItem.SourcePath) {\r\n" +
-            "      Remove-Item -LiteralPath $rollbackItem.SourcePath -Recurse -Force -ErrorAction SilentlyContinue\r\n" +
-            "    }\r\n" +
-            "    if (Test-Path -LiteralPath $rollbackItem.RollbackPath) {\r\n" +
-            "      Move-Item -LiteralPath $rollbackItem.RollbackPath -Destination $rollbackItem.SourcePath -Force\r\n" +
-            "    }\r\n" +
-            "  }\r\n" +
-            "  Set-Content -LiteralPath '" + EscapePowerShellString(failedUpdateMarkerPath) + "' -Value $_.Exception.Message -Encoding UTF8\r\n" +
-            "  Remove-Item -LiteralPath '" + EscapePowerShellString(pendingUpdateDirectory) + "' -Recurse -Force -ErrorAction SilentlyContinue\r\n" +
-            "}\r\n" +
-            "Start-Process -FilePath '" + EscapePowerShellString(launcherPath) + "'\r\n";
-    }
+        // Separate typed rollback records so restore logic never needs to infer type.
+        var backedUpFiles = new List<string>();
+        var backedUpDirectories = new List<string>();
 
-    private static string EscapePowerShellString(string rawValue)
-    {
-        return rawValue.Replace("'", "''");
+        try
+        {
+            try { File.Delete(errorMarkerPath); } catch { }
+
+            // Back up existing managed files: rename to <name>.rollback.
+            foreach (string fileName in ManagedFileNames)
+            {
+                string existingPath = Path.Combine(rootDirectory, fileName);
+                if (!File.Exists(existingPath))
+                {
+                    continue;
+                }
+
+                string rollbackPath = existingPath + ".rollback";
+                if (File.Exists(rollbackPath))
+                {
+                    File.Delete(rollbackPath);
+                }
+
+                File.Move(existingPath, rollbackPath);
+                backedUpFiles.Add(existingPath);
+            }
+
+            // Back up existing managed directories: rename to <name>.rollback.
+            // Directory.Move within the same volume is an atomic NTFS rename.
+            foreach (string dirName in ManagedDirectoryNames)
+            {
+                string existingPath = Path.Combine(rootDirectory, dirName);
+                if (!Directory.Exists(existingPath))
+                {
+                    continue;
+                }
+
+                string rollbackPath = existingPath + ".rollback";
+                if (Directory.Exists(rollbackPath))
+                {
+                    Directory.Delete(rollbackPath, recursive: true);
+                }
+
+                Directory.Move(existingPath, rollbackPath);
+                backedUpDirectories.Add(existingPath);
+            }
+
+            // Install new managed files from the staged bundle.
+            foreach (string fileName in ManagedFileNames)
+            {
+                string sourcePath = Path.Combine(pendingUpdateDir, fileName);
+                if (!File.Exists(sourcePath))
+                {
+                    continue;
+                }
+
+                File.Copy(sourcePath, Path.Combine(rootDirectory, fileName));
+            }
+
+            // Install new managed directories from the staged bundle.
+            // Moving from updates/pending-portable-update/ to the root is always
+            // same-volume, so Directory.Move is an atomic NTFS rename.
+            foreach (string dirName in ManagedDirectoryNames)
+            {
+                string sourcePath = Path.Combine(pendingUpdateDir, dirName);
+                if (!Directory.Exists(sourcePath))
+                {
+                    continue;
+                }
+
+                Directory.Move(sourcePath, Path.Combine(rootDirectory, dirName));
+            }
+
+            // Remove the (now mostly empty) pending update directory.
+            try { Directory.Delete(pendingUpdateDir, recursive: true); } catch { }
+
+            // Launch the newly installed EZTest.exe and exit this (old) process.
+            // The new process will call CleanupRollbackFiles() on startup to remove
+            // the .rollback backups we left behind.
+            Process.Start(launcherPath);
+            return true;
+        }
+        catch (Exception updateError)
+        {
+            // Best-effort rollback: restore every item that was successfully backed up.
+            foreach (string originalPath in backedUpFiles)
+            {
+                string rollbackPath = originalPath + ".rollback";
+                try
+                {
+                    if (File.Exists(rollbackPath))
+                    {
+                        if (File.Exists(originalPath))
+                        {
+                            File.Delete(originalPath);
+                        }
+                        File.Move(rollbackPath, originalPath);
+                    }
+                }
+                catch { }
+            }
+
+            foreach (string originalPath in backedUpDirectories)
+            {
+                string rollbackPath = originalPath + ".rollback";
+                try
+                {
+                    if (Directory.Exists(rollbackPath))
+                    {
+                        if (Directory.Exists(originalPath))
+                        {
+                            Directory.Delete(originalPath, recursive: true);
+                        }
+                        Directory.Move(rollbackPath, originalPath);
+                    }
+                }
+                catch { }
+            }
+
+            // Write the failure reason so the next launch can display it.
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(rootDirectory, UpdatesDirectoryName));
+                File.WriteAllText(errorMarkerPath, updateError.Message);
+            }
+            catch { }
+
+            // Remove the broken pending update so we don't retry it next launch.
+            try { Directory.Delete(pendingUpdateDir, recursive: true); } catch { }
+
+            return false;
+        }
     }
 
     private static string FindEzTestRoot(string startDirectory)

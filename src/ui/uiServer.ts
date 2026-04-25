@@ -174,18 +174,18 @@ function downloadFileOverHttps(downloadUrl: string, destinationFilePath: string)
   });
 }
 
-/** Extracts a portable zip file into the given destination directory using PowerShell. */
+/**
+ * Extracts a portable zip file into the given destination directory using the
+ * Windows built-in tar.exe (available since Windows 10 1803). This avoids
+ * spawning PowerShell with -ExecutionPolicy Bypass, which triggers AV heuristics.
+ */
 function extractPortableArchive(zipFilePath: string, destinationDirectoryPath: string): Promise<void> {
-  const escapedZipFilePath = zipFilePath.replace(/'/g, "''");
-  const escapedDestinationDirectoryPath = destinationDirectoryPath.replace(/'/g, "''");
-
+  // tar.exe lives in System32 and is always on PATH on Windows 10+.
+  // Flags: -x extract, -f archive file, -C change to destination before extracting.
   return new Promise((resolvePromise, rejectPromise) => {
-    const extractProcess = spawn('powershell', [
-      '-NoProfile',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      "Expand-Archive -Force -LiteralPath '" + escapedZipFilePath + "' -DestinationPath '" + escapedDestinationDirectoryPath + "'",
+    const extractProcess = spawn('tar.exe', [
+      '-xf', zipFilePath,
+      '-C', destinationDirectoryPath,
     ], {
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],

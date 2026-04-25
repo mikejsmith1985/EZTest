@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2026-04-25
+
+### Changed
+- **Launcher update mechanism — no more PowerShell** — `TryApplyPendingUpdate` now performs the staged update using pure .NET `File.Move` / `File.Copy` / `Directory.Move` operations. The previous approach wrote a `.ps1` script to `%TEMP%` and executed it with `powershell.exe -ExecutionPolicy Bypass`, which triggered Windows Defender and other AV heuristics. The new implementation is zero-script: it renames existing items to `.rollback`, installs new items from the staged bundle, launches the new EZTest.exe, and exits. Rollbacks are cleaned up on the next launch.
+- **ZIP extraction — no more PowerShell** — The in-app update downloader (`extractPortableArchive`) now uses the Windows built-in `tar.exe` (available since Windows 10 1803) instead of `powershell Expand-Archive -ExecutionPolicy Bypass`.
+- **Windows application manifest embedded in EZTest.exe** — the launcher is now compiled with `/win32manifest:EZTest.manifest`. The manifest declares `requestedExecutionLevel="asInvoker"`, Windows 10/11 OS compatibility GUIDs, and DPI awareness settings. These are standard legitimacy signals that AV engines use to reduce suspicion of unsigned binaries.
+- **Assembly metadata embedded** — EZTest.exe now carries `AssemblyTitle`, `AssemblyDescription`, `AssemblyCompany`, `AssemblyProduct`, `AssemblyCopyright`, `AssemblyVersion`, and `AssemblyFileVersion` attributes, visible in Windows Explorer → Properties → Details.
+- **Version set to `0.1.3`** in `package.json`, `package-lock.json`, `src/cli/index.ts`, `src/mcp/server.ts`, and `launcher/EZTestLauncher.cs`.
+
 ## [0.1.2] - 2026-04-16
 
 ### Added
