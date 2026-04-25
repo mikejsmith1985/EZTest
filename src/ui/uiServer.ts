@@ -7,7 +7,7 @@ import { createServer } from 'node:http';
 import { get as httpsGet } from 'node:https';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join, resolve, isAbsolute } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import express from 'express';
@@ -435,12 +435,18 @@ function spawnAndStreamProcess(
   workingDirectory: string,
   clientSocket: SocketIoSocket,
 ): void {
-  // shell: true ensures npx/tsx resolve on all platforms including Windows
+  // Absolute paths (e.g. process.execPath = "C:\Program Files\nodejs\node.exe") must
+  // NOT use shell: true — cmd.exe splits unquoted paths at spaces, turning
+  // "C:\Program Files\..." into the unknown command "C:\Program".
+  // Short names like "npx" and "tsx" are not absolute paths and need shell: true
+  // so Windows can resolve them from PATH.
+  const shouldUseShell = !isAbsolute(command);
+
   const childProcess = spawn(command, commandArgs, {
     cwd: workingDirectory,
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env },
-    shell: true,
+    shell: shouldUseShell,
   });
 
   activeChildProcess = childProcess;
