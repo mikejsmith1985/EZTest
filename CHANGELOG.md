@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **API key management UI** — A new "Manage AI Provider" card on the dashboard lets users initialize, update, or remove their AI provider key directly within the app — no manual `.env` editing required.
+  - **Initialize**: Enter an API key for GitHub Copilot, OpenAI, or Anthropic and save it to `.env` immediately.
+  - **Update**: Switch providers or rotate a key at any time; the change takes effect in the running process without a restart.
+  - **Remove**: One-click key removal with a confirmation prompt; clears both the provider key and `EZTEST_AI_PROVIDER` from `.env` and the running process.
+- `GET /api/env` endpoint — returns the currently active provider name and label (never exposes the key value itself).
+- `DELETE /api/env` endpoint — removes the active provider's credentials from `.env` and the running process.
+
+
 ## [0.1.4] - 2026-04-25
 
 ### Fixed

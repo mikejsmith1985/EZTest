@@ -86,10 +86,11 @@ test.describe('uiServer', () => {
 
     const scriptContent = scriptMatch![1];
 
-    // Confirm all 5 action cards are present — a blank page means cards are missing
+    // Confirm all 6 action cards are present — a blank page means cards are missing
     const cardMatches = htmlBody.match(/class="action-card"/g) ?? [];
-    expect(cardMatches).toHaveLength(5);
+    expect(cardMatches).toHaveLength(6);
     expect(htmlBody).toContain('Set Up EZTest In My IDE');
+    expect(htmlBody).toContain('Manage AI Provider');
 
     // The most common template-literal escape bug: \d and \s lose their backslash,
     // turning /(\d+)/ into /(d+)/ in the output. Verify the raw regex chars are correct.
@@ -223,6 +224,93 @@ test.describe('uiServer', () => {
     const errorBody = await response.json() as { saved: boolean; error: string };
     expect(errorBody.saved).toBe(false);
     expect(errorBody.error).toBeTruthy();
+  });
+
+  // ── GET /api/env ─────────────────────────────────────────────────────────────
+
+  test('GET /api/env returns hasKey false when no API key is set', async () => {
+    // Stash and clear all known provider keys so the status read starts clean
+    const savedGithubToken   = process.env['EZTEST_GITHUB_TOKEN'];
+    const savedOpenAiKey     = process.env['OPENAI_API_KEY'];
+    const savedAnthropicKey  = process.env['ANTHROPIC_API_KEY'];
+    const savedAiProvider    = process.env['EZTEST_AI_PROVIDER'];
+
+    delete process.env['EZTEST_GITHUB_TOKEN'];
+    delete process.env['OPENAI_API_KEY'];
+    delete process.env['ANTHROPIC_API_KEY'];
+    delete process.env['EZTEST_AI_PROVIDER'];
+
+    try {
+      const response = await fetch(activeServerInstance.serverUrl + '/api/env');
+      expect(response.status).toBe(200);
+
+      const envStatus = await response.json() as { provider: string | null; providerLabel: string; hasKey: boolean };
+      expect(envStatus.hasKey).toBe(false);
+      expect(envStatus.provider).toBeNull();
+    } finally {
+      if (savedGithubToken  !== undefined) { process.env['EZTEST_GITHUB_TOKEN']  = savedGithubToken; }
+      if (savedOpenAiKey    !== undefined) { process.env['OPENAI_API_KEY']        = savedOpenAiKey; }
+      if (savedAnthropicKey !== undefined) { process.env['ANTHROPIC_API_KEY']     = savedAnthropicKey; }
+      if (savedAiProvider   !== undefined) { process.env['EZTEST_AI_PROVIDER']    = savedAiProvider; }
+    }
+  });
+
+  test('GET /api/env returns correct provider when OpenAI key is present', async () => {
+    const savedOpenAiKey  = process.env['OPENAI_API_KEY'];
+    const savedAiProvider = process.env['EZTEST_AI_PROVIDER'];
+    const savedGithubToken = process.env['EZTEST_GITHUB_TOKEN'];
+
+    // Only set OpenAI so the provider detection is unambiguous
+    delete process.env['EZTEST_GITHUB_TOKEN'];
+    delete process.env['EZTEST_AI_PROVIDER'];
+    process.env['OPENAI_API_KEY'] = 'sk-test-get-env-openai';
+
+    try {
+      const response = await fetch(activeServerInstance.serverUrl + '/api/env');
+      expect(response.status).toBe(200);
+
+      const envStatus = await response.json() as { provider: string | null; providerLabel: string; hasKey: boolean };
+      expect(envStatus.hasKey).toBe(true);
+      expect(envStatus.provider).toBe('openai');
+      expect(envStatus.providerLabel).toBe('OpenAI');
+    } finally {
+      if (savedOpenAiKey   !== undefined) { process.env['OPENAI_API_KEY']      = savedOpenAiKey;   } else { delete process.env['OPENAI_API_KEY']; }
+      if (savedAiProvider  !== undefined) { process.env['EZTEST_AI_PROVIDER']  = savedAiProvider;  } else { delete process.env['EZTEST_AI_PROVIDER']; }
+      if (savedGithubToken !== undefined) { process.env['EZTEST_GITHUB_TOKEN'] = savedGithubToken; } else { delete process.env['EZTEST_GITHUB_TOKEN']; }
+    }
+  });
+
+  // ── DELETE /api/env ───────────────────────────────────────────────────────────
+
+  test('DELETE /api/env removes the active provider key from process.env', async () => {
+    const savedOpenAiKey  = process.env['OPENAI_API_KEY'];
+    const savedAiProvider = process.env['EZTEST_AI_PROVIDER'];
+
+    // Set up OpenAI as the active provider so delete has something to remove
+    process.env['OPENAI_API_KEY']     = 'sk-test-delete-openai';
+    process.env['EZTEST_AI_PROVIDER'] = 'openai';
+
+    try {
+      const response = await fetch(activeServerInstance.serverUrl + '/api/env', { method: 'DELETE' });
+      expect(response.status).toBe(200);
+
+      const removeResult = await response.json() as { removed: boolean };
+      expect(removeResult.removed).toBe(true);
+
+      // The server must have cleared the key from its running process.env
+      expect(process.env['OPENAI_API_KEY']).toBeUndefined();
+      expect(process.env['EZTEST_AI_PROVIDER']).toBeUndefined();
+    } finally {
+      if (savedOpenAiKey  !== undefined) { process.env['OPENAI_API_KEY']     = savedOpenAiKey;  } else { delete process.env['OPENAI_API_KEY']; }
+      if (savedAiProvider !== undefined) { process.env['EZTEST_AI_PROVIDER'] = savedAiProvider; } else { delete process.env['EZTEST_AI_PROVIDER']; }
+      // Clean up any .env lines written during this test
+      const envFilePath = join(process.cwd(), '.env');
+      if (existsSync(envFilePath)) {
+        let envContent = readFileSync(envFilePath, 'utf-8');
+        envContent = envContent.replace(/^OPENAI_API_KEY=sk-test-delete-openai\r?\n?/m, '');
+        writeFileSync(envFilePath, envContent, 'utf-8');
+      }
+    }
   });
 
   // ── Socket.io ────────────────────────────────────────────────────────────────

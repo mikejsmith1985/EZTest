@@ -663,6 +663,71 @@ export function buildWizardPageHtml(): string {
       vertical-align: middle;
     }
     @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ── API Key Settings modal ── */
+    .api-key-modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.72);
+      z-index: 200;
+      display: flex; align-items: center; justify-content: center;
+      padding: 24px;
+    }
+    .api-key-modal-card {
+      background: ${COLOR_CARD};
+      border: 1px solid ${COLOR_BORDER};
+      border-radius: 14px;
+      padding: 28px 32px;
+      width: 100%;
+      max-width: 480px;
+    }
+    .api-key-modal-title {
+      font-size: 1.08rem; font-weight: 700; margin-bottom: 6px;
+    }
+    .api-key-modal-desc {
+      font-size: 0.87rem; color: ${COLOR_MUTED}; margin-bottom: 20px; line-height: 1.5;
+    }
+    /* Status row showing current provider at the top of the modal */
+    .api-key-status-row {
+      display: flex; align-items: center; gap: 10px;
+      background: ${COLOR_BG}; border: 1px solid ${COLOR_BORDER};
+      border-radius: 8px; padding: 10px 14px; margin-bottom: 20px;
+      font-size: 0.87rem;
+    }
+    .api-key-status-badge {
+      font-size: 0.73rem; font-weight: 600; padding: 2px 9px; border-radius: 10px;
+      flex-shrink: 0;
+    }
+    .api-key-status-badge.is-connected { background: rgba(63,185,80,0.15); color: ${COLOR_SUCCESS}; }
+    .api-key-status-badge.is-missing   { background: rgba(248,81,73,0.15);  color: ${COLOR_ERROR};   }
+    /* Form fields inside the modal */
+    .api-key-modal-form label {
+      display: block; font-size: 0.78rem; color: ${COLOR_MUTED}; margin-bottom: 6px;
+      text-transform: uppercase; letter-spacing: 0.5px;
+    }
+    .api-key-modal-form select,
+    .api-key-modal-form input[type="password"] {
+      width: 100%; background: ${COLOR_BG}; border: 1px solid ${COLOR_BORDER};
+      color: ${COLOR_PRIMARY}; border-radius: 6px; padding: 8px 12px;
+      font-size: 0.88rem; margin-bottom: 16px;
+    }
+    .api-key-modal-form select:focus,
+    .api-key-modal-form input[type="password"]:focus {
+      outline: none; border-color: ${COLOR_ACCENT};
+    }
+    /* Bottom action row: Remove key (left, danger) + Cancel/Save (right) */
+    .api-key-modal-actions {
+      display: flex; justify-content: space-between; align-items: center; margin-top: 4px;
+    }
+    .api-key-modal-primary-actions { display: flex; gap: 8px; }
+    .btn-danger {
+      background: transparent; border: 1px solid ${COLOR_ERROR}; color: ${COLOR_ERROR};
+      border-radius: 6px; padding: 7px 14px; font-size: 0.87rem; font-weight: 600; cursor: pointer;
+    }
+    .btn-danger:hover { background: rgba(248,81,73,0.12); }
+    /* Inline feedback line shown after save or remove */
+    .api-key-feedback { font-size: 0.82rem; margin-top: 8px; min-height: 18px; }
+    .api-key-feedback.is-success { color: ${COLOR_SUCCESS}; }
+    .api-key-feedback.is-error   { color: ${COLOR_ERROR};   }
   </style>
 </head>
 <body>
@@ -837,6 +902,21 @@ export function buildWizardPageHtml(): string {
           <button class="action-btn" id="btn-mcp-setup">Open MCP Setup &#8594;</button>
         </div>
 
+        <!-- Card 6: Manage AI Provider -->
+        <div class="action-card">
+          <div class="action-icon">&#x1F511;</div>
+          <div class="action-title">Manage AI Provider</div>
+          <div class="action-description">
+            Initialize, update, or remove the API key EZTest uses for AI&#8209;powered
+            test generation. Switch between GitHub Copilot, OpenAI, and Anthropic
+            — all without touching a config file by hand.
+          </div>
+          <div class="action-best-for">
+            <strong>Best for:</strong> First-time setup or switching to a different AI provider.
+          </div>
+          <button class="action-btn" id="btn-api-settings">Manage API Key &#8594;</button>
+        </div>
+
       </div>
     </div>
   </div>
@@ -855,6 +935,62 @@ export function buildWizardPageHtml(): string {
         <button class="btn-ghost" id="config-cancel-btn">Cancel</button>
         <button class="btn-primary" id="config-run-btn">Run &#8594;</button>
       </div>
+    </div>
+  </div>
+
+
+  <!-- ─────────────────────────────────────────────────────────────────────
+       API KEY SETTINGS MODAL
+       Lets users initialize, update, or remove their AI provider key at any
+       time from the dashboard — no manual .env editing required.
+       ───────────────────────────────────────────────────────────────────── -->
+  <div id="api-key-overlay" class="api-key-modal-backdrop" style="display:none">
+    <div class="api-key-modal-card">
+
+      <div class="api-key-modal-title">&#x1F511; Manage AI Provider</div>
+      <div class="api-key-modal-desc">
+        Update or remove the API key EZTest uses for AI-powered test generation.
+        Changes are saved to your <code style="font-size:0.82em; background:${COLOR_BG}; padding:1px 5px; border-radius:3px;">.env</code>
+        file and take effect immediately — no restart needed.
+      </div>
+
+      <!-- Current provider status badge — populated by openApiKeySettings() -->
+      <div class="api-key-status-row">
+        <span id="api-key-status-icon">&#x2753;</span>
+        <span id="api-key-status-text" style="flex:1">Checking&hellip;</span>
+        <span id="api-key-status-badge" class="api-key-status-badge"></span>
+      </div>
+
+      <div class="api-key-modal-form">
+        <label>Provider</label>
+        <select id="settings-provider-select">
+          <option value="github">GitHub Copilot (uses your Copilot subscription)</option>
+          <option value="openai">OpenAI (GPT-4o)</option>
+          <option value="anthropic">Anthropic (Claude)</option>
+          <option value="copilot">Copilot via gh CLI (no key needed)</option>
+        </select>
+
+        <!-- Key input is hidden for the copilot provider since it uses the gh CLI -->
+        <div id="settings-key-row">
+          <label>API Key</label>
+          <input type="password" id="settings-api-key"
+                 placeholder="Paste your key here"
+                 autocomplete="off" />
+        </div>
+      </div>
+
+      <!-- Inline feedback: success or error message after save / remove -->
+      <div id="api-key-feedback" class="api-key-feedback"></div>
+
+      <div class="api-key-modal-actions">
+        <!-- Remove is shown only when a key is currently configured -->
+        <button class="btn-danger" id="api-key-remove-btn" style="display:none">Remove Key</button>
+        <div class="api-key-modal-primary-actions">
+          <button class="btn-ghost"    id="api-key-cancel-btn">Cancel</button>
+          <button class="btn-primary"  id="api-key-save-btn">Save Changes</button>
+        </div>
+      </div>
+
     </div>
   </div>
 
@@ -1519,6 +1655,168 @@ export function buildWizardPageHtml(): string {
       activeConfigRunFn = null;
     }
 
+    // ── API Key Settings modal ─────────────────────────────────────────────────
+
+    /**
+     * Opens the API key settings modal and fetches the current provider status
+     * from the server so the status row reflects live .env state.
+     */
+    function openApiKeySettings() {
+      var overlayEl  = document.getElementById('api-key-overlay');
+      var feedbackEl = document.getElementById('api-key-feedback');
+
+      // Clear any previous feedback before re-opening
+      feedbackEl.textContent = '';
+      feedbackEl.className   = 'api-key-feedback';
+      overlayEl.style.display = 'flex';
+
+      reloadApiKeyStatus();
+    }
+
+    /**
+     * Fetches the current provider status from /api/env and updates the status
+     * row inside the modal. Called on open and after a successful save/remove.
+     */
+    function reloadApiKeyStatus() {
+      fetch('/api/env')
+        .then(function(r) { return r.json(); })
+        .then(function(envStatus) {
+          var statusIconEl   = document.getElementById('api-key-status-icon');
+          var statusTextEl   = document.getElementById('api-key-status-text');
+          var statusBadgeEl  = document.getElementById('api-key-status-badge');
+          var removeBtnEl    = document.getElementById('api-key-remove-btn');
+          var providerSelect = document.getElementById('settings-provider-select');
+
+          if (envStatus.hasKey) {
+            statusIconEl.textContent  = '\u2705';
+            statusTextEl.textContent  = envStatus.providerLabel + ' is connected';
+            statusBadgeEl.textContent = 'Connected';
+            statusBadgeEl.className   = 'api-key-status-badge is-connected';
+            removeBtnEl.style.display = 'inline-block';
+            // Pre-select the active provider so the user sees what is configured
+            if (envStatus.provider) { providerSelect.value = envStatus.provider; }
+          } else {
+            statusIconEl.textContent  = '\u{1F511}';
+            statusTextEl.textContent  = 'No API key configured';
+            statusBadgeEl.textContent = 'Not connected';
+            statusBadgeEl.className   = 'api-key-status-badge is-missing';
+            removeBtnEl.style.display = 'none';
+          }
+
+          // Reflect the provider selection in the key-input visibility
+          updateSettingsKeyRowVisibility();
+        })
+        .catch(function() {
+          document.getElementById('api-key-status-text').textContent = 'Could not load status.';
+        });
+    }
+
+    /**
+     * Shows or hides the API key input field based on the selected provider.
+     * The copilot provider authenticates via the gh CLI — no stored key is needed.
+     */
+    function updateSettingsKeyRowVisibility() {
+      var selectedProvider = document.getElementById('settings-provider-select').value;
+      var keyRowEl         = document.getElementById('settings-key-row');
+      keyRowEl.style.display = selectedProvider === 'copilot' ? 'none' : 'block';
+    }
+
+    /**
+     * Saves the selected provider and API key by POSTing to /api/env.
+     * Updates the status row on success and clears the key input.
+     */
+    function saveApiKeySettings() {
+      var providerSelect   = document.getElementById('settings-provider-select');
+      var keyInputEl       = document.getElementById('settings-api-key');
+      var feedbackEl       = document.getElementById('api-key-feedback');
+      var selectedProvider = providerSelect.value;
+      var enteredKey       = keyInputEl.value.trim();
+
+      // The copilot provider uses gh CLI auth — no key to enter or validate
+      var isCopilotSelected = selectedProvider === 'copilot';
+
+      if (!isCopilotSelected && !enteredKey) {
+        feedbackEl.textContent = 'Please enter an API key for the selected provider.';
+        feedbackEl.className   = 'api-key-feedback is-error';
+        keyInputEl.focus();
+        return;
+      }
+
+      feedbackEl.textContent = 'Saving\u2026';
+      feedbackEl.className   = 'api-key-feedback';
+
+      // Use a sentinel value for copilot since the backend ignores apiKey for that path
+      var requestPayload = {
+        provider: selectedProvider,
+        apiKey:   isCopilotSelected ? 'copilot-via-gh-cli' : enteredKey,
+      };
+
+      fetch('/api/env', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(requestPayload),
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(saveResult) {
+          if (saveResult.saved) {
+            feedbackEl.textContent = '\u2705 Saved! AI provider updated successfully.';
+            feedbackEl.className   = 'api-key-feedback is-success';
+            // Sync in-memory status so the dashboard reflects the change immediately
+            if (statusData) { statusData.apiKey = { ok: true }; }
+            keyInputEl.value = '';
+            reloadApiKeyStatus();
+          } else {
+            feedbackEl.textContent = saveResult.error || 'Save failed. Please try again.';
+            feedbackEl.className   = 'api-key-feedback is-error';
+          }
+        })
+        .catch(function() {
+          feedbackEl.textContent = 'Network error. Please try again.';
+          feedbackEl.className   = 'api-key-feedback is-error';
+        });
+    }
+
+    /**
+     * Removes the current API key after confirming with the user.
+     * Sends DELETE /api/env and refreshes the status row on success.
+     */
+    function removeApiKey() {
+      var feedbackEl = document.getElementById('api-key-feedback');
+      var shouldRemove = window.confirm(
+        'Remove the current API key?\n\n' +
+        'EZTest will not be able to generate tests until a new key is added.'
+      );
+      if (!shouldRemove) { return; }
+
+      feedbackEl.textContent = 'Removing\u2026';
+      feedbackEl.className   = 'api-key-feedback';
+
+      fetch('/api/env', { method: 'DELETE' })
+        .then(function(r) { return r.json(); })
+        .then(function(removeResult) {
+          if (removeResult.removed) {
+            feedbackEl.textContent = 'API key removed. Add a new key above to re-enable AI features.';
+            feedbackEl.className   = 'api-key-feedback is-success';
+            // Sync in-memory status so action cards reflect the missing key
+            if (statusData) { statusData.apiKey = { ok: false }; }
+            reloadApiKeyStatus();
+          } else {
+            feedbackEl.textContent = removeResult.error || 'Removal failed. Please try again.';
+            feedbackEl.className   = 'api-key-feedback is-error';
+          }
+        })
+        .catch(function() {
+          feedbackEl.textContent = 'Network error. Please try again.';
+          feedbackEl.className   = 'api-key-feedback is-error';
+        });
+    }
+
+    /** Closes the API key settings modal and clears the key input for security. */
+    function closeApiKeySettings() {
+      document.getElementById('api-key-overlay').style.display = 'none';
+      document.getElementById('settings-api-key').value = '';
+    }
+
     // ── Run output modal ──────────────────────────────────────────────────────
 
     /**
@@ -1868,6 +2166,17 @@ export function buildWizardPageHtml(): string {
       document.getElementById('btn-run-tests').addEventListener('click', handleRunTestsFromCard);
       document.getElementById('btn-mcp-setup').addEventListener('click', handleMcpSetup);
       document.getElementById('btn-open-last-report').addEventListener('click', handleOpenLastReport);
+
+      // API key settings modal
+      document.getElementById('btn-api-settings').addEventListener('click', openApiKeySettings);
+      document.getElementById('api-key-cancel-btn').addEventListener('click', closeApiKeySettings);
+      document.getElementById('api-key-save-btn').addEventListener('click', saveApiKeySettings);
+      document.getElementById('api-key-remove-btn').addEventListener('click', removeApiKey);
+      document.getElementById('settings-provider-select').addEventListener('change', updateSettingsKeyRowVisibility);
+      // Clicking the backdrop (outside the card) closes the modal
+      document.getElementById('api-key-overlay').addEventListener('click', function(clickEvent) {
+        if (clickEvent.target === this) { closeApiKeySettings(); }
+      });
 
       // Config overlay
       document.getElementById('config-cancel-btn').addEventListener('click', closeConfigOverlay);

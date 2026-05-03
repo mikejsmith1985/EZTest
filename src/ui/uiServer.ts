@@ -666,6 +666,27 @@ function persistEnvKey(envKey: string, envValue: string): void {
   process.env[envKey] = envValue;
 }
 
+/**
+ * Removes an environment variable line from the .env file and unsets it from
+ * the current process so subsequent status checks reflect the removal immediately
+ * without requiring an application restart.
+ */
+function removeEnvKey(envKey: string): void {
+  const envFilePath = join(getEzTestRootDirectory(), '.env');
+  if (!existsSync(envFilePath)) { return; }
+
+  let envFileContent = readFileSync(envFilePath, 'utf-8');
+
+  // Match the full key=value line including the trailing newline (CRLF or LF)
+  const keyLinePattern = new RegExp(`^${envKey}=.*\\r?\\n?`, 'm');
+  envFileContent = envFileContent.replace(keyLinePattern, '');
+
+  writeFileSync(envFilePath, envFileContent, 'utf-8');
+
+  // Unset from the running process so subsequent /api/status calls see the change
+  delete process.env[envKey];
+}
+
 // ── App config helpers ─────────────────────────────────────────────────────────
 
 /** Path where EZTest stores its own settings (never the user's project folder). */
@@ -994,6 +1015,63 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
     persistEnvKey('EZTEST_AI_PROVIDER', provider);
 
     res.json({ saved: true });
+  });
+
+  // ── GET /api/env — returns active provider status (never exposes key values) ──
+  // Used by the API key management UI to show which provider is currently connected.
+  expressApp.get('/api/env', (_req, res) => {
+    const hasGithubKey     = Boolean((process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])?.trim());
+    const hasOpenAiKey     = Boolean(process.env['OPENAI_API_KEY']?.trim());
+    const hasAnthropicKey  = Boolean(process.env['ANTHROPIC_API_KEY']?.trim());
+    const isCopilotProvider = process.env['EZTEST_AI_PROVIDER'] === 'copilot';
+
+    let activeProvider: string | null = null;
+    let providerLabel                 = 'None';
+
+    // Mirror the same priority order used in readAiConfigFromEnvironment() in config.ts:
+    // copilot > github > openai > anthropic
+    if (isCopilotProvider) {
+      activeProvider = 'copilot';
+      providerLabel  = 'Copilot via gh CLI';
+    } else if (hasGithubKey) {
+      activeProvider = 'github';
+      providerLabel  = 'GitHub Copilot';
+    } else if (hasOpenAiKey) {
+      activeProvider = 'openai';
+      providerLabel  = 'OpenAI';
+    } else if (hasAnthropicKey) {
+      activeProvider = 'anthropic';
+      providerLabel  = 'Anthropic';
+    }
+
+    const hasKey = hasGithubKey || hasOpenAiKey || hasAnthropicKey || isCopilotProvider;
+    res.json({ provider: activeProvider, providerLabel, hasKey });
+  });
+
+  // ── DELETE /api/env — removes the active provider's API key from .env ─────────
+  // Clears both the provider-specific key and the EZTEST_AI_PROVIDER selector so
+  // EZTest is fully decoupled from the removed provider after this call.
+  expressApp.delete('/api/env', (_req, res) => {
+    // Map each provider to the env var(s) that hold its credentials
+    const providerKeyEnvVars: Record<string, string[]> = {
+      github:    ['EZTEST_GITHUB_TOKEN', 'GITHUB_MODELS_TOKEN'],
+      openai:    ['OPENAI_API_KEY'],
+      anthropic: ['ANTHROPIC_API_KEY'],
+      copilot:   [],   // copilot authenticates via gh CLI — no stored key to remove
+    };
+
+    const activeProvider = process.env['EZTEST_AI_PROVIDER'] ?? '';
+    const credentialKeysToRemove = providerKeyEnvVars[activeProvider]
+      // When no explicit provider is set, fall back to clearing all known key vars
+      ?? ['EZTEST_GITHUB_TOKEN', 'GITHUB_MODELS_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
+
+    for (const credentialKey of credentialKeysToRemove) {
+      removeEnvKey(credentialKey);
+    }
+    // Always clear the provider selector so stale config doesn't affect future key detection
+    removeEnvKey('EZTEST_AI_PROVIDER');
+
+    res.json({ removed: true });
   });
 
   // ── GET /api/app-config — returns saved project path + scan result ────────
