@@ -1783,7 +1783,7 @@ export function buildWizardPageHtml(): string {
     function removeApiKey() {
       var feedbackEl = document.getElementById('api-key-feedback');
       var shouldRemove = window.confirm(
-        'Remove the current API key?\n\n' +
+        'Remove the current API key?\\n\\n' +
         'EZTest will not be able to generate tests until a new key is added.'
       );
       if (!shouldRemove) { return; }
