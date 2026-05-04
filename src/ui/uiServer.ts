@@ -487,12 +487,16 @@ function spawnAndStreamProcess(
     }
   });
 
+  // Route stderr through detectLogLevel just like stdout — EZTest uses ⚠ and ✗
+  // prefixes on stderr to distinguish warnings from errors, so hardcoding 'error'
+  // would make every retry/warning line appear red in the UI.
   childProcess.stderr?.on('data', (dataChunk: Buffer) => {
     const outputText = dataChunk.toString();
     for (const outputLine of outputText.split('\n')) {
       const trimmedLine = stripAnsiCodes(outputLine.trimEnd());
       if (trimmedLine.length === 0) { continue; }
-      clientSocket.emit('run:log', { level: 'error' as LogLevel, message: trimmedLine });
+      const logLevel = detectLogLevel(trimmedLine);
+      clientSocket.emit('run:log', { level: logLevel, message: trimmedLine });
     }
   });
 
