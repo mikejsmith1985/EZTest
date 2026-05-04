@@ -444,6 +444,7 @@ function spawnAndStreamProcess(
   commandArgs: string[],
   workingDirectory: string,
   clientSocket: SocketIoSocket,
+  doneMetadata: Record<string, unknown> = {},
 ): void {
   // Absolute paths (e.g. process.execPath = "C:\Program Files\nodejs\node.exe") must
   // NOT use shell: true — cmd.exe splits unquoted paths at spaces, turning
@@ -482,7 +483,7 @@ function spawnAndStreamProcess(
 
   childProcess.on('close', (exitCode: number | null) => {
     activeChildProcess = null;
-    clientSocket.emit('run:done', { exitCode: exitCode ?? 1 });
+    clientSocket.emit('run:done', { exitCode: exitCode ?? 1, ...doneMetadata });
   });
 
   childProcess.on('error', (processError: Error) => {
@@ -490,7 +491,7 @@ function spawnAndStreamProcess(
       level: 'error' as LogLevel,
       message: 'Failed to start process: ' + processError.message,
     });
-    clientSocket.emit('run:done', { exitCode: 1 });
+    clientSocket.emit('run:done', { exitCode: 1, ...doneMetadata });
     activeChildProcess = null;
   });
 }
@@ -644,7 +645,7 @@ function spawnPlaywrightTestRun(
     '--reporter=list,html',
   ];
 
-  spawnAndStreamProcess('npx', playwrightArgs, targetDirectory, clientSocket);
+  spawnAndStreamProcess('npx', playwrightArgs, targetDirectory, clientSocket, { workingDir: targetDirectory });
 }
 
 /**

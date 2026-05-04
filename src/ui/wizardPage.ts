@@ -2106,7 +2106,7 @@ export function buildWizardPageHtml(): string {
         }
         // After a successful test run, offer to open the HTML report (in modal and on main card)
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
-          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          lastTestRunWorkingDir = data.workingDir || currentRunConfig.workingDir || null;
           document.getElementById('open-report-btn').style.display = 'inline-block';
           document.getElementById('btn-open-last-report').style.display = 'block';
         }
@@ -2123,7 +2123,7 @@ export function buildWizardPageHtml(): string {
         doneMsg.textContent = '❌ Finished with errors (exit code ' + data.exitCode + ')';
         // Even on failure, offer report — partial results are still useful
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
-          lastTestRunWorkingDir = currentRunConfig.workingDir || null;
+          lastTestRunWorkingDir = data.workingDir || currentRunConfig.workingDir || null;
           document.getElementById('open-report-btn').style.display = 'inline-block';
           document.getElementById('btn-open-last-report').style.display = 'block';
           // Offer AI selector fixing when the last generate config is available to re-run
