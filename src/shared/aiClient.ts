@@ -6,7 +6,7 @@
  */
 import type { AiMessage, AiResponse } from './types.js';
 import type { AiConfig } from './config.js';
-import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION, COPILOT_FREE_MODEL_ROTATION } from './config.js';
+import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION, COPILOT_FREE_MODEL_ROTATION, GEMINI_MODEL_ROTATION, GEMINI_MAX_TOKENS_PER_CALL } from './config.js';
 import { logDebug, logWarning } from './logger.js';
 import { getCopilotSessionToken } from './copilotAuth.js';
 
@@ -257,7 +257,52 @@ async function createAnthropicAdapter(apiKey: string): Promise<ProviderAdapter> 
   };
 }
 
-// ── Retry Logic ────────────────────────────────────────────────────────────
+// ── Google Gemini Adapter ───────────────────────────────────────────────────
+
+/**
+ * Base URL for the Google Gemini API's OpenAI-compatible endpoint.
+ * Using the standard OpenAI SDK means no extra npm dependency is required —
+ * only the base URL and API key change from the OpenAI adapter.
+ */
+const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+
+/**
+ * Adapter for the Google Gemini API using its OpenAI-compatible chat endpoint.
+ * Get a free API key at: https://aistudio.google.com/app/apikey
+ */
+async function createGeminiAdapter(apiKey: string): Promise<ProviderAdapter> {
+  const { default: OpenAI } = await import('openai');
+
+  // maxRetries: 0 — EZTest handles retries via executeWithRetry with backoff support.
+  const geminiClient = new OpenAI({
+    apiKey,
+    baseURL: GEMINI_API_BASE_URL,
+    maxRetries: 0,
+  });
+
+  return {
+    async sendMessages(messages, modelName, maxTokens) {
+      const response = await geminiClient.chat.completions.create({
+        model: modelName,
+        messages,
+        max_tokens: maxTokens,
+      });
+
+      const firstChoice = response.choices[0];
+      if (!firstChoice?.message.content) {
+        throw new Error('Gemini API returned an empty response');
+      }
+
+      return {
+        content: firstChoice.message.content,
+        tokensUsed: response.usage?.total_tokens ?? 0,
+        modelUsed: response.model,
+      };
+    },
+  };
+}
+
+
 
 /** HTTP status codes that indicate a transient failure worth retrying. */
 const RETRYABLE_STATUS_CODES = new Set([403, 429, 500, 502, 503, 504]);
@@ -473,6 +518,21 @@ function buildModelRotationList(aiConfig: AiConfig): readonly string[] {
     return [configuredModel, ...COPILOT_FREE_MODEL_ROTATION];
   }
 
+  // For OpenAI, Anthropic and Gemini a single model is used — no free-tier rotation needed.
+  // Gemini also uses the rotation list; fall through to it below.
+  if (aiConfig.provider === 'gemini') {
+    const configuredModel = aiConfig.modelOverride;
+    if (!configuredModel) {
+      return GEMINI_MODEL_ROTATION;
+    }
+    const configuredModelPosition = GEMINI_MODEL_ROTATION.indexOf(configuredModel);
+    if (configuredModelPosition >= 0) {
+      return GEMINI_MODEL_ROTATION.slice(configuredModelPosition);
+    }
+    // Custom model not in the rotation list — honour it, then fall back to defaults
+    return [configuredModel, ...GEMINI_MODEL_ROTATION];
+  }
+
   // For OpenAI and Anthropic a single model is used — no free-tier rotation needed
   const singleModelName = aiConfig.modelOverride ?? getDefaultModelForProvider(aiConfig.provider);
   return [singleModelName];
@@ -526,6 +586,8 @@ export class AiClient {
       this.providerAdapter = await createCopilotChatApiAdapter();
     } else if (this.aiConfig.provider === 'openai') {
       this.providerAdapter = await createOpenAiAdapter(this.aiConfig.apiKey);
+    } else if (this.aiConfig.provider === 'gemini') {
+      this.providerAdapter = await createGeminiAdapter(this.aiConfig.apiKey);
     } else {
       this.providerAdapter = await createAnthropicAdapter(this.aiConfig.apiKey);
     }
@@ -625,6 +687,7 @@ export class AiClient {
    * The Copilot API supports 16 384 output tokens per call — over 4× the GitHub Models
    * cap of 4 096. Using the correct budget per provider dramatically reduces the number
    * of batch calls needed (22 → ~5 for a typical 26-component app on Copilot).
+   * Gemini uses GEMINI_MAX_TOKENS_PER_CALL (8 192), giving a budget of ~7 372 tokens.
    *
    * Value is 90% of the provider's hard cap, leaving a margin for response verbosity.
    */
@@ -632,6 +695,9 @@ export class AiClient {
     const BUDGET_MARGIN = 0.9;
     if (this.aiConfig.provider === 'copilot') {
       return Math.floor(COPILOT_MAX_OUTPUT_TOKENS * BUDGET_MARGIN); // ~14 745
+    }
+    if (this.aiConfig.provider === 'gemini') {
+      return Math.floor(GEMINI_MAX_TOKENS_PER_CALL * BUDGET_MARGIN); // ~7 372
     }
     // GitHub Models, OpenAI, Anthropic all use the configured maxTokensPerCall
     return Math.floor(this.aiConfig.maxTokensPerCall * BUDGET_MARGIN);

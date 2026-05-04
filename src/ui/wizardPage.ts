@@ -967,6 +967,7 @@ export function buildWizardPageHtml(): string {
           <option value="github">GitHub Copilot (uses your Copilot subscription)</option>
           <option value="openai">OpenAI (GPT-4o)</option>
           <option value="anthropic">Anthropic (Claude)</option>
+          <option value="gemini">Google Gemini (gemini-2.0-flash)</option>
           <option value="copilot">Copilot via gh CLI (no key needed)</option>
         </select>
 

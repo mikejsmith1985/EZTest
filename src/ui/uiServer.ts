@@ -1011,6 +1011,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       copilot:   'EZTEST_AI_PROVIDER',
       openai:    'OPENAI_API_KEY',
       anthropic: 'ANTHROPIC_API_KEY',
+      gemini:    'GOOGLE_API_KEY',
     };
     const envKeyName = envKeyMap[provider] ?? 'OPENAI_API_KEY';
 
@@ -1031,22 +1032,26 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
   // ── GET /api/env — returns active provider status (never exposes key values) ──
   // Used by the API key management UI to show which provider is currently connected.
   expressApp.get('/api/env', (_req, res) => {
-    const hasGithubKey     = Boolean((process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])?.trim());
-    const hasOpenAiKey     = Boolean(process.env['OPENAI_API_KEY']?.trim());
-    const hasAnthropicKey  = Boolean(process.env['ANTHROPIC_API_KEY']?.trim());
+    const hasGithubKey      = Boolean((process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN'])?.trim());
+    const hasOpenAiKey      = Boolean(process.env['OPENAI_API_KEY']?.trim());
+    const hasAnthropicKey   = Boolean(process.env['ANTHROPIC_API_KEY']?.trim());
+    const hasGeminiKey      = Boolean(process.env['GOOGLE_API_KEY']?.trim());
     const isCopilotProvider = process.env['EZTEST_AI_PROVIDER'] === 'copilot';
 
     let activeProvider: string | null = null;
     let providerLabel                 = 'None';
 
     // Mirror the same priority order used in readAiConfigFromEnvironment() in config.ts:
-    // copilot > github > openai > anthropic
+    // copilot > github > gemini > anthropic > openai
     if (isCopilotProvider) {
       activeProvider = 'copilot';
       providerLabel  = 'Copilot via gh CLI';
     } else if (hasGithubKey) {
       activeProvider = 'github';
       providerLabel  = 'GitHub Copilot';
+    } else if (hasGeminiKey) {
+      activeProvider = 'gemini';
+      providerLabel  = 'Google Gemini';
     } else if (hasOpenAiKey) {
       activeProvider = 'openai';
       providerLabel  = 'OpenAI';
@@ -1055,7 +1060,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       providerLabel  = 'Anthropic';
     }
 
-    const hasKey = hasGithubKey || hasOpenAiKey || hasAnthropicKey || isCopilotProvider;
+    const hasKey = hasGithubKey || hasOpenAiKey || hasAnthropicKey || hasGeminiKey || isCopilotProvider;
     res.json({ provider: activeProvider, providerLabel, hasKey });
   });
 
@@ -1068,13 +1073,14 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerI
       github:    ['EZTEST_GITHUB_TOKEN', 'GITHUB_MODELS_TOKEN'],
       openai:    ['OPENAI_API_KEY'],
       anthropic: ['ANTHROPIC_API_KEY'],
+      gemini:    ['GOOGLE_API_KEY'],
       copilot:   [],   // copilot authenticates via gh CLI — no stored key to remove
     };
 
     const activeProvider = process.env['EZTEST_AI_PROVIDER'] ?? '';
     const credentialKeysToRemove = providerKeyEnvVars[activeProvider]
       // When no explicit provider is set, fall back to clearing all known key vars
-      ?? ['EZTEST_GITHUB_TOKEN', 'GITHUB_MODELS_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
+      ?? ['EZTEST_GITHUB_TOKEN', 'GITHUB_MODELS_TOKEN', 'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_API_KEY'];
 
     for (const credentialKey of credentialKeysToRemove) {
       removeEnvKey(credentialKey);
