@@ -418,9 +418,11 @@ async function executeWithRetry<ReturnType>(
         if (attemptIndex < maxRetryAttempts) {
           const backoffDelayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attemptIndex);
           const waitDelayMs = retryAfterDelayMs ?? backoffDelayMs;
+          // Use specific cause label so the user knows this is temporary and being handled.
+          const causeLabel = retryAfterDelayMs ? 'Rate limited' : 'Temporary API error';
           logWarning(
-            `AI call failed (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1}) for "${operationDescription}". ` +
-            `Retrying in ${Math.round(waitDelayMs / 1000)}s${retryAfterDelayMs ? ' (retry-after)' : ''}...`,
+            `${causeLabel} for "${operationDescription}" — retrying in ` +
+            `${Math.round(waitDelayMs / 1000)}s (attempt ${attemptIndex + 1}/${maxRetryAttempts + 1})...`,
           );
           await new Promise(resolve => setTimeout(resolve, waitDelayMs));
           continue;
