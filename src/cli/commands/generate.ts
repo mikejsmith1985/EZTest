@@ -22,6 +22,7 @@ import { mapComponentAnalysesToUserFlows } from '../../synthesizer/flowMapper.js
 import {
   generateTestsForFlows,
   runAndFixGeneratedTests,
+  fixSpecFilesFromDisk,
 } from '../../synthesizer/testGenerator.js';
 import { detectAndReadAppSpec, readAppSpecFromFile } from '../../synthesizer/appSpecReader.js';
 import {
@@ -50,6 +51,64 @@ const DEFAULT_MAX_FLOW_COUNT = 10;
  * model quotas unnecessarily. Users can force-enable review with --review.
  */
 const GITHUB_FREE_TIER_QUOTA_THRESHOLD = 45;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Logs the run-and-fix summary in a consistent human-readable format.
+ *
+ * The summary distinguishes three categories so the developer understands what
+ * actually happened — not just a raw pass/fail count:
+ * 1. Tests that passed (no action needed)
+ * 2. Tests fixed by selector regeneration (AI found the right locator)
+ * 3. Tests that likely expose real application bugs (do NOT auto-fix these)
+ */
+function logRunAndFixSummary(
+  fixResult: import('../../synthesizer/testGenerator.js').RunAndFixResult,
+  providerNameForContext: string,
+): void {
+  console.log('');
+  logInfo('── Run-and-Fix Summary ───────────────────────────────────────────');
+  logSuccess(`  ✓ Passed on first run:  ${fixResult.passedOnFirstRunCount}`);
+
+  if (fixResult.fixedByRegenerationCount > 0) {
+    logSuccess(`  ✓ Fixed by regeneration: ${fixResult.fixedByRegenerationCount} (selector issue — AI updated the locator)`);
+  }
+
+  // Suspected code bugs: behavioral failures that should NOT be auto-fixed
+  if (fixResult.suspectedCodeBugCount > 0) {
+    logWarning(`\n  ⚠ Suspected application bugs: ${fixResult.suspectedCodeBugCount}`);
+    logWarning(`  These tests failed with behavioral assertions (wrong URL, content, or state).`);
+    logWarning(`  The tests were left unchanged — do NOT rewrite them to pass.`);
+    logWarning(`  Review with your development team:\n`);
+    for (const outcome of fixResult.fileOutcomes.filter(o => o.outcome === 'suspected-code-bug')) {
+      logWarning(`    ⚑ ${outcome.fileName}`);
+      if (outcome.suspectedBugDescription) {
+        logWarning(`      → ${outcome.suspectedBugDescription}`);
+      }
+    }
+  }
+
+  if (fixResult.stillFailingCount > 0) {
+    const genuineBugOutcomes = fixResult.fileOutcomes.filter(o => o.outcome === 'likely-genuine-bug');
+    const truelyStillFailing = fixResult.stillFailingCount - genuineBugOutcomes.length;
+
+    if (genuineBugOutcomes.length > 0) {
+      logWarning(`\n  ⚑ Persistent failures (likely real bugs): ${genuineBugOutcomes.length}`);
+      logWarning(`  AI could not fix these after multiple attempts. They probably expose broken features.`);
+      logWarning(`  Left as red tests — they are valuable documentation of what doesn't work:\n`);
+      for (const outcome of genuineBugOutcomes) {
+        logWarning(`    ✗ ${outcome.fileName}`);
+      }
+    }
+
+    if (truelyStillFailing > 0) {
+      logWarning(`  ✗ Still failing (unclear reason): ${truelyStillFailing} (check verbose output)`);
+    }
+  }
+
+  void providerNameForContext; // Used by caller for context, not needed in body
+}
 
 /**
  * Registers the `generate` subcommand on the given Commander program instance.
@@ -108,7 +167,13 @@ export function registerGenerateCommand(program: Command): void {
     .option(
       '--run-and-fix',
       'After generating tests, immediately run them and attempt to fix any that fail by sending errors back to AI. ' +
-      'Fixes selector mismatches; tests that still fail likely reveal real bugs and are left as red tests.',
+      'Fixes selector mismatches; tests that reveal real behavioral bugs are left as red tests.',
+    )
+    .option(
+      '--fix-only-files <paths>',
+      'Comma-separated list of existing spec file paths to run and fix without re-generating. ' +
+      'Skips all source analysis and test generation stages. ' +
+      'Use this after a test run when you want to fix only the failing tests.',
     )
     .option(
       '--working-dir <path>',
@@ -128,7 +193,7 @@ export function registerGenerateCommand(program: Command): void {
       'Enable verbose debug logging',
     )
     .action(async (commandOptions: {
-      source: string;
+      source?: string;
       url: string;
       output: string;
       edgeCases: boolean;
@@ -138,6 +203,7 @@ export function registerGenerateCommand(program: Command): void {
       spec?: string;
       review: boolean;
       runAndFix: boolean;
+      fixOnlyFiles?: string;
       workingDir?: string;
       audit: boolean;
       dryRun: boolean;
@@ -150,6 +216,61 @@ export function registerGenerateCommand(program: Command): void {
       const ezTestConfig = loadConfig();
       const maxComponentCount = parseInt(commandOptions.maxComponents, 10) || DEFAULT_MAX_COMPONENT_COUNT;
       const maxFlowCount = parseInt(commandOptions.maxFlows, 10) || DEFAULT_MAX_FLOW_COUNT;
+
+      // ── Fix-Only Mode: skip all generation stages ──────────────────────────
+      // When --fix-only-files is set, the user wants to fix specific existing spec
+      // files without re-running the full generate pipeline. Skip straight to the
+      // run-and-classify-and-fix loop.
+      if (commandOptions.fixOnlyFiles) {
+        const absoluteSpecPaths = commandOptions.fixOnlyFiles
+          .split(',')
+          .map(specFilePath => resolve(specFilePath.trim()));
+
+        logInfo(`Starting EZTest fix-only...`);
+        logInfo(`  Target URL: ${commandOptions.url}`);
+        logInfo(`  Files to fix: ${absoluteSpecPaths.length}`);
+
+        const fixOnlyAiClient = new AiClient(ezTestConfig.ai);
+        try {
+          await fixOnlyAiClient.initialize();
+          logInfo(`  AI: ${fixOnlyAiClient.providerName} / ${fixOnlyAiClient.modelName}`);
+        } catch (initError) {
+          logError('Failed to initialize AI client', initError);
+          logError('Make sure an API key is set in your .env file.');
+          process.exitCode = 1;
+          return;
+        }
+
+        const fixOnlyWorkingDir = commandOptions.workingDir ?? process.cwd();
+        const fixOnlyAppSpec = commandOptions.spec ? readAppSpecFromFile(commandOptions.spec)?.specContent ?? undefined : undefined;
+
+        let fixResult;
+        try {
+          fixResult = await fixSpecFilesFromDisk(absoluteSpecPaths, {
+            targetAppUrl: commandOptions.url,
+            outputDirectory: commandOptions.output ?? fixOnlyWorkingDir,
+            aiClient: fixOnlyAiClient,
+            appSpec: fixOnlyAppSpec,
+            workingDirectory: fixOnlyWorkingDir,
+          });
+        } catch (fixError) {
+          logError('Fix-only pass failed', fixError);
+          process.exitCode = 1;
+          return;
+        }
+
+        logRunAndFixSummary(fixResult, fixOnlyAiClient.providerName);
+        return;
+      }
+
+      // The source directory is required for full generation. --fix-only-files skips
+      // this path entirely via the early return above, so this guard only trips if
+      // the user runs `generate` without --source (misconfiguration, not normal flow).
+      if (!commandOptions.source) {
+        logError('Missing required option: --source <directory>');
+        process.exitCode = 1;
+        return;
+      }
 
       logInfo(`Starting EZTest generate...`);
       logInfo(`  Source: ${commandOptions.source}`);
@@ -371,22 +492,7 @@ export function registerGenerateCommand(program: Command): void {
         }
 
         if (fixResult) {
-          console.log('');
-          logInfo('── Run-and-Fix Summary ───────────────────────────────────────────');
-          logSuccess(`  ✓ Passed on first run:  ${fixResult.passedOnFirstRunCount}`);
-          if (fixResult.fixedByRegenerationCount > 0) {
-            logSuccess(`  ✓ Fixed by regeneration: ${fixResult.fixedByRegenerationCount}`);
-          }
-          if (fixResult.stillFailingCount > 0) {
-            const genuineBugCount = fixResult.fileOutcomes.filter(outcome => outcome.outcome === 'likely-genuine-bug').length;
-            if (genuineBugCount > 0) {
-              logWarning(`  ⚑ Likely reveals bugs:   ${genuineBugCount} (left as red tests — these are valuable!)`);
-            }
-            const truelyStillFailing = fixResult.stillFailingCount - genuineBugCount;
-            if (truelyStillFailing > 0) {
-              logWarning(`  ✗ Still failing:         ${truelyStillFailing} (check verbose output for details)`);
-            }
-          }
+          logRunAndFixSummary(fixResult, aiClient.providerName);
 
           // Persist selector fixes so future runs avoid the same brittle patterns
           for (const fixedOutcome of fixResult.fileOutcomes.filter(outcome => outcome.outcome === 'fixed')) {

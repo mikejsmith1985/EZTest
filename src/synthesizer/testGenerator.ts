@@ -10,8 +10,8 @@
  * - Are organized one-flow-per-file for clear traceability
  * - Include a human-readable summary of what is being validated
  */
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { resolve, dirname, join } from 'node:path';
+import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'node:fs';
+import { resolve, dirname, join, basename } from 'node:path';
 import type { UserFlow, GeneratedTestFile, ForgeAppContext, ComponentAnalysis } from '../shared/types.js';
 import type { AiClient } from '../shared/aiClient.js';
 import {
@@ -25,6 +25,10 @@ import {
   type GeneratedTestSuiteResult,
 } from './generatedTestRunner.js';
 import { auditGeneratedTests } from './testQualityAuditor.js';
+import {
+  classifyTestFailure,
+  describeBehavioralFailure,
+} from './testFailureClassifier.js';
 
 // ── File Name Generation ───────────────────────────────────────────────────
 
@@ -372,10 +376,25 @@ export interface RunAndFixOptions {
 export interface TestFileFixResult {
   testFilePath: string;
   fileName: string;
-  /** How the file ended up: passed on first run, fixed after regen, or still failing. */
-  outcome: 'passed' | 'fixed' | 'still-failing' | 'likely-genuine-bug';
+  /**
+   * How the file ended up after the run-and-fix pass:
+   * - `passed`: passed on the first run — no changes needed
+   * - `fixed`: was failing but the AI fixed the selector — test now passes
+   * - `suspected-code-bug`: failed with a behavioral assertion (wrong URL, wrong
+   *   text, disabled element). The app behaved incorrectly. Do NOT auto-fix —
+   *   this is a developer action item, not a test problem.
+   * - `likely-genuine-bug`: still failing after max AI attempts. Likely a real
+   *   behavioral gap rather than a selector issue.
+   * - `still-failing`: ran out of regeneration attempts without a clear category.
+   */
+  outcome: 'passed' | 'fixed' | 'suspected-code-bug' | 'likely-genuine-bug' | 'still-failing';
   /** Number of regeneration attempts made (0 if passed on first try). */
   regenerationAttemptCount: number;
+  /**
+   * For suspected-code-bug outcomes: a short explanation of what the app
+   * did wrong, to show the developer in the summary.
+   */
+  suspectedBugDescription?: string;
 }
 
 /** Summary of the entire run-and-fix pass. */
@@ -384,10 +403,15 @@ export interface RunAndFixResult {
   fileOutcomes: TestFileFixResult[];
   /** Files that passed on the first run (no fixing needed). */
   passedOnFirstRunCount: number;
-  /** Files that were fixed by regeneration. */
+  /** Files that were fixed by selector regeneration. */
   fixedByRegenerationCount: number;
   /** Files that still fail after max regeneration attempts. */
   stillFailingCount: number;
+  /**
+   * Files that failed with behavioral assertions — these indicate real application
+   * bugs, NOT test problems. The tests were intentionally left unchanged.
+   */
+  suspectedCodeBugCount: number;
 }
 
 /**
@@ -477,6 +501,7 @@ export async function runAndFixGeneratedTests(
       passedOnFirstRunCount: 0,
       fixedByRegenerationCount: 0,
       stillFailingCount: 0,
+      suspectedCodeBugCount: 0,
     };
   }
 
@@ -488,6 +513,7 @@ export async function runAndFixGeneratedTests(
   const fileOutcomes: TestFileFixResult[] = [];
   let fixedByRegenerationCount = 0;
   let stillFailingCount = 0;
+  let suspectedCodeBugCount = 0;
 
   // ── Regeneration loop for failed files ────────────────────────────────
   for (const failedFileResult of initialSuiteResult.failedFiles) {
@@ -505,6 +531,28 @@ export async function runAndFixGeneratedTests(
         regenerationAttemptCount: 0,
       });
       stillFailingCount++;
+      continue;
+    }
+
+    // ── Classify the failure BEFORE attempting any fix ──────────────────
+    // Behavioral failures mean the APPLICATION behaved incorrectly, not the test.
+    // Rewriting the test to make it pass would hide a real bug — never do that.
+    const failureCategory = classifyTestFailure(failedFileResult.errorSummary);
+
+    if (failureCategory === 'behavioral-failure') {
+      const bugDescription = describeBehavioralFailure(failedFileResult.errorSummary);
+      logWarning(
+        `  ⚑ ${failedFileResult.fileName} — suspected application bug: ${bugDescription}. ` +
+        `Test preserved unchanged — review with your development team.`,
+      );
+      suspectedCodeBugCount++;
+      fileOutcomes.push({
+        testFilePath: failedFileResult.testFilePath,
+        fileName: failedFileResult.fileName,
+        outcome: 'suspected-code-bug',
+        regenerationAttemptCount: 0,
+        suspectedBugDescription: bugDescription,
+      });
       continue;
     }
 
@@ -595,5 +643,86 @@ export async function runAndFixGeneratedTests(
     passedOnFirstRunCount: initialSuiteResult.passedFileCount,
     fixedByRegenerationCount,
     stillFailingCount,
+    suspectedCodeBugCount,
   };
+}
+
+// ── Fix-Only Mode ──────────────────────────────────────────────────────────
+
+/**
+ * Reads existing spec files from disk and constructs the minimal GeneratedTestFile
+ * objects needed by the fix loop without requiring the original generation context.
+ *
+ * Used when the user wants to fix failing tests without re-generating from scratch.
+ * The sourceFlow is reconstructed from the file name — enough for the AI to write
+ * improved selectors since the test code itself provides the behavioral context.
+ */
+function loadSpecFilesFromDisk(absoluteSpecPaths: string[], targetAppUrl: string): GeneratedTestFile[] {
+  const loadedFiles: GeneratedTestFile[] = [];
+
+  for (const specPath of absoluteSpecPaths) {
+    let testSourceCode: string;
+    try {
+      testSourceCode = readFileSync(specPath, 'utf-8');
+    } catch {
+      logWarning(`Could not read spec file: ${specPath} — skipping`);
+      continue;
+    }
+
+    // Derive a human-readable flow name from the file name
+    const fileNameWithoutExtension = basename(specPath).replace(/\.spec\.ts$/, '');
+    const derivedFlowName = fileNameWithoutExtension.replace(/-/g, ' ');
+
+    const minimalFlow: UserFlow = {
+      flowName: derivedFlowName,
+      startingUrl: targetAppUrl,
+      steps: [],            // Steps are empty — the AI will use the existing test code
+      involvedComponents: [],
+      flowKind: 'happy-path',
+    };
+
+    loadedFiles.push({
+      suggestedOutputPath: specPath,
+      testSourceCode,
+      sourceFlow: minimalFlow,
+      assertionSummary: extractAssertionSummary(testSourceCode),
+    });
+  }
+
+  return loadedFiles;
+}
+
+/**
+ * Runs fix-and-classify on a specific set of existing spec files without re-generating
+ * tests from scratch.
+ *
+ * This is the entry point for the "fix only the failing tests" workflow:
+ * 1. Run the specified spec files against the live app
+ * 2. For each failure: classify as selector-mismatch or behavioral-failure
+ * 3. Selector issues: attempt AI-driven locator regeneration
+ * 4. Behavioral failures: leave the test unchanged and surface as a developer action item
+ *
+ * @param absoluteSpecPaths - Absolute paths to the .spec.ts files to run and fix
+ * @param options - Configuration including app URL and AI client
+ */
+export async function fixSpecFilesFromDisk(
+  absoluteSpecPaths: string[],
+  options: RunAndFixOptions,
+): Promise<RunAndFixResult> {
+  const loadedFiles = loadSpecFilesFromDisk(absoluteSpecPaths, options.targetAppUrl);
+
+  if (loadedFiles.length === 0) {
+    logWarning('No spec files could be loaded from disk — nothing to fix.');
+    return {
+      suiteResult: { passedFileCount: 0, failedFileCount: 0, totalFileCount: 0, fileResults: [], failedFiles: [] },
+      fileOutcomes: [],
+      passedOnFirstRunCount: 0,
+      fixedByRegenerationCount: 0,
+      stillFailingCount: 0,
+      suspectedCodeBugCount: 0,
+    };
+  }
+
+  logInfo(`[Fix] Running ${loadedFiles.length} existing spec file(s) to find failures...`);
+  return runAndFixGeneratedTests(loadedFiles, options);
 }

@@ -304,7 +304,7 @@ export interface UiServerInstance {
  * Fields are workflow-dependent — unused fields will be undefined.
  */
 interface RunConfig {
-  workflow: 'init' | 'plan' | 'generate' | 'record' | 'replay' | 'run-tests';
+  workflow: 'init' | 'plan' | 'generate' | 'record' | 'replay' | 'run-tests' | 'fix-tests';
   source?: string;
   url?: string;
   output?: string;
@@ -323,6 +323,12 @@ interface RunConfig {
   noReview?: boolean;
   /** Whether to dry-run (print output without writing files). */
   dryRun?: boolean;
+  /**
+   * For the `fix-tests` workflow: the specific spec file paths that failed in the
+   * last test run. Only these files will be run through the classify-and-fix loop.
+   * When present, skips all generation stages.
+   */
+  failedTestFiles?: string[];
 }
 
 /** Log severity levels understood by the wizard terminal pane. */
@@ -421,6 +427,17 @@ function buildCliArgsForWorkflow(runConfig: RunConfig): string[] {
     if (runConfig.output)    { cliArgs.push('--output', runConfig.output); }
     if (runConfig.runAndFix) { cliArgs.push('--run-and-fix'); }
     if (runConfig.noReview)  { cliArgs.push('--no-review'); }
+
+  } else if (runConfig.workflow === 'fix-tests') {
+    // fix-tests reuses the generate command with --fix-only-files so all the AI
+    // client initialization and run-and-fix logic is handled in one place.
+    cliArgs[0] = 'generate'; // Override the workflow name to 'generate'
+    if (runConfig.url)              { cliArgs.push('--url', runConfig.url); }
+    if (runConfig.output)           { cliArgs.push('--output', runConfig.output); }
+    if (runConfig.workingDir)       { cliArgs.push('--working-dir', runConfig.workingDir); }
+    if (runConfig.failedTestFiles && runConfig.failedTestFiles.length > 0) {
+      cliArgs.push('--fix-only-files', runConfig.failedTestFiles.join(','));
+    }
 
   } else if (runConfig.workflow === 'record') {
     if (runConfig.url)    { cliArgs.push('--url',    runConfig.url);    }
