@@ -1065,8 +1065,15 @@ export function buildWizardPageHtml(): string {
     var progressRetryCountdown = null;
     /** Total test files to generate, extracted from "Generating Playwright tests for N" log line. */
     var progressTotalTests = 0;
-    /** Running count of confirmed-written test files, incremented on each "Written:" log line. */
+    /** Running count of completed test results (pass or fail) from a Playwright run. */
     var progressTestsWritten = 0;
+    /** Count of failed tests seen so far in the current Playwright run. */
+    var progressTestsFailed = 0;
+    /**
+     * The human-readable reason for the last run failure, captured from the most recent
+     * [EZTest] ✗ log line. Shown in the done bar instead of "exit code N".
+     */
+    var lastRunErrorReason = '';
     /**
      * The last successfully completed generate run config.
      * Retained so the "Run Tests" button knows which output dir and project root to use.
@@ -1837,6 +1844,8 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-progress-section').style.display = 'block';
       progressTotalTests   = 0;
       progressTestsWritten = 0;
+      progressTestsFailed  = 0;
+      lastRunErrorReason   = '';
       if (progressRetryCountdown) {
         clearInterval(progressRetryCountdown);
         progressRetryCountdown = null;
@@ -1864,6 +1873,11 @@ export function buildWizardPageHtml(): string {
       line.textContent = message;
       terminal.appendChild(line);
       terminal.scrollTop = terminal.scrollHeight;
+
+      // Capture the last EZTest failure line as a human-readable reason.
+      // Matches "[EZTest] ✗ Some reason" or "[EZTest] X Some reason" (ASCII fallback).
+      var ezFailMatch = message.match(/\\[EZTest\\]\\s+[✗X]\\s+(.+)/);
+      if (ezFailMatch) { lastRunErrorReason = ezFailMatch[1].trim(); }
     }
 
     /**
@@ -2011,6 +2025,7 @@ export function buildWizardPageHtml(): string {
       // Maps completions 0→progressTotalTests into the 5%–95% range so the bar moves
       // steadily while tests execute regardless of whether they pass or fail.
       if (progressTotalTests > 0 && /^(ok|x)\\s+\\d+/.test(logMessage)) {
+        if (/^x\\s+\\d+/.test(logMessage)) { progressTestsFailed++; }
         progressTestsWritten = Math.min(progressTestsWritten + 1, progressTotalTests);
         var playwrightPercent = 5 + Math.floor((progressTestsWritten / progressTotalTests) * 90);
         updateRunProgress(playwrightPercent, 'Running tests — ' + progressTestsWritten + ' of ' + progressTotalTests + '…');
@@ -2119,8 +2134,19 @@ export function buildWizardPageHtml(): string {
         doneMsg.textContent = 'Cancelled';
       } else {
         updateRunProgress(100, '❌ Finished with errors');
-        doneMsg.className   = 'run-result-failure';
-        doneMsg.textContent = '❌ Finished with errors (exit code ' + data.exitCode + ')';
+        doneMsg.className = 'run-result-failure';
+
+        // Build a human-readable reason: prefer test counts for test runs,
+        // then the last ✗ line captured from the log, then a plain fallback.
+        var failureReason;
+        if (currentRunConfig && currentRunConfig.workflow === 'run-tests' && progressTotalTests > 0) {
+          failureReason = progressTestsFailed + ' of ' + progressTotalTests + ' tests failed';
+        } else if (lastRunErrorReason) {
+          failureReason = lastRunErrorReason;
+        } else {
+          failureReason = 'Run failed — see log above for details';
+        }
+        doneMsg.textContent = '❌ ' + failureReason;
         // Even on failure, offer report — partial results are still useful
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
           lastTestRunWorkingDir = data.workingDir || currentRunConfig.workingDir || null;
