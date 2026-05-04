@@ -149,10 +149,11 @@ const COPILOT_EDITOR_HEADERS = {
 /**
  * Minimum delay (in milliseconds) between consecutive Copilot API calls.
  * The Copilot API aggressively rate-limits with intermittent 403 responses.
- * A 1.5-second cooldown between calls dramatically reduces the 403 rate,
- * making the overall pipeline faster than rapid-fire calls + retry backoff.
+ * A 3-second cooldown between calls dramatically reduces the 403 rate when
+ * processing many batches in sequence, making the overall pipeline more
+ * reliable than rapid-fire calls + retry backoff.
  */
-const COPILOT_INTER_REQUEST_DELAY_MS = 1_500;
+const COPILOT_INTER_REQUEST_DELAY_MS = 3_000;
 
 /** Timestamp of the last successful or attempted Copilot API call. */
 let lastCopilotRequestTimestamp = 0;

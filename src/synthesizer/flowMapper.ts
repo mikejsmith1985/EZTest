@@ -369,7 +369,21 @@ export async function mapComponentAnalysesToUserFlows(
     );
 
     const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
-    const flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+
+    // Wrap each batch individually so a rate-limit failure on one batch does not
+    // abort the whole run. The remaining batches often succeed once the brief
+    // Copilot rate-limit window passes. Skipping a batch produces fewer flows
+    // but is far better than a complete failure with zero output.
+    let flowGenerationResponse;
+    try {
+      flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+    } catch (batchError) {
+      logWarning(
+        `Batch ${batchIndex + 1}/${componentBatches.length} failed after all retries — skipping. ` +
+        `(${batchError instanceof Error ? batchError.message : String(batchError)})`,
+      );
+      continue;
+    }
 
     const batchFlows = parseAiJsonResponse<AiGeneratedFlow[]>(
       flowGenerationResponse.content,
