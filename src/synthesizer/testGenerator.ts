@@ -20,6 +20,7 @@ import {
   buildTestRegenerationPrompt,
 } from './promptTemplates.js';
 import { logDebug, logInfo, logWarning, logSuccess } from '../shared/logger.js';
+import { captureAriaSnapshot } from './ariaSnapshotCapture.js';
 import {
   runGeneratedTestFiles,
   type GeneratedTestSuiteResult,
@@ -427,6 +428,7 @@ async function regenerateFailingTestFile(
   targetAppUrl: string,
   aiClient: AiClient,
   appSpec: string | undefined,
+  ariaSnapshot?: string,
 ): Promise<GeneratedTestFile | null> {
   logDebug(`  Regenerating test for "${generatedFile.sourceFlow.flowName}"...`);
 
@@ -436,6 +438,7 @@ async function regenerateFailingTestFile(
     errorOutput,
     targetAppUrl,
     appSpec,
+    ariaSnapshot,
   );
 
   let aiResponse;
@@ -510,6 +513,14 @@ export async function runAndFixGeneratedTests(
   // ── First run: establish baseline pass/fail ────────────────────────────
   const initialSuiteResult = await runGeneratedTestFiles(absoluteTestPaths, workingDirectory);
 
+  // ── Capture accessibility snapshot for context-aware regeneration ─────
+  // Best-effort: if capture fails, regeneration continues without the snapshot.
+  // The snapshot gives the AI accurate element names to fix selector mismatches.
+  const currentPageAriaSnapshot = await captureAriaSnapshot(targetAppUrl);
+  if (currentPageAriaSnapshot) {
+    logDebug(`Captured aria snapshot (${currentPageAriaSnapshot.length} chars) to aid test regeneration`);
+  }
+
   const fileOutcomes: TestFileFixResult[] = [];
   let fixedByRegenerationCount = 0;
   let stillFailingCount = 0;
@@ -573,6 +584,7 @@ export async function runAndFixGeneratedTests(
         targetAppUrl,
         aiClient,
         appSpec,
+        currentPageAriaSnapshot ?? undefined,
       );
 
       if (!regeneratedFile) {

@@ -17,6 +17,12 @@ import {
   buildUserFlowGenerationPrompt,
 } from './promptTemplates.js';
 import { logDebug, logWarning } from '../shared/logger.js';
+import pLimit from 'p-limit';
+import {
+  parseFlowsFromAiResponse,
+  parseComponentIntentFromAiResponse,
+} from './aiResponseSchemas.js';
+import type { AiGeneratedFlow, ComponentIntentResponse } from './aiResponseSchemas.js';
 
 // ── Dynamic Batch Sizing ───────────────────────────────────────────────────
 
@@ -105,34 +111,9 @@ export function splitIntoDynamicBatches(
 
 // ── AI Response Parsing ────────────────────────────────────────────────────
 
-/** The shape of the AI's response to the component intent analysis prompt. */
-interface ComponentIntentResponse {
-  componentPurpose: string;
-  userActions: Array<{
-    actionName: string;
-    description: string;
-    triggerElement: string;
-    expectedOutcome: string;
-    canFail: boolean;
-    failureOutcome?: string;
-  }>;
-  requiredSetup: string;
-}
-
-/** The shape of a single user flow in the AI's flow generation response. */
-interface AiGeneratedFlow {
-  flowName: string;
-  startingRoute: string;
-  flowKind: 'happy-path' | 'error-case' | 'edge-case';
-  steps: Array<{
-    stepDescription: string;
-    targetElementDescription: string;
-    expectedOutcome: string;
-    isNavigation: boolean;
-  }>;
-  involvedComponents: string[];
-  testPriority: 'critical' | 'high' | 'medium';
-}
+// AiGeneratedFlow and ComponentIntentResponse types are imported from aiResponseSchemas.ts.
+// Zod-validated parsing is handled by parseFlowsFromAiResponse and
+// parseComponentIntentFromAiResponse from the same module.
 
 /**
  * Resolves an AI-provided starting route into a usable browser URL.
@@ -160,83 +141,6 @@ function resolveStartingUrl(startingRoute: string, baseUrl: string): string {
   }
 }
 
-/**
- * Attempts to recover a valid JSON array from a response that was cut off mid-stream
- * because the model hit its output token limit. Tries two strategies in order:
- *   1. Truncate at the last `},` boundary (end of last complete array item)
- *   2. Truncate at the last `}` (catches the final item if it wasn't followed by a comma)
- * Returns null if neither strategy produces a parseable array with at least one item.
- */
-function recoverTruncatedJsonArray(truncatedContent: string): unknown[] | null {
-  if (!truncatedContent.trim().startsWith('[')) return null;
-
-  // Strategy 1: find the last complete object ending with `},` and close the array
-  const lastCommaEnd = truncatedContent.lastIndexOf('},');
-  if (lastCommaEnd !== -1) {
-    try {
-      const candidate = truncatedContent.slice(0, lastCommaEnd + 1) + ']';
-      const parsed = JSON.parse(candidate);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {
-      // Fall through to strategy 2
-    }
-  }
-
-  // Strategy 2: find the last `}` — works when the final object was complete but
-  // the closing `]` was never emitted before the token limit was hit
-  const lastBrace = truncatedContent.lastIndexOf('}');
-  if (lastBrace !== -1) {
-    try {
-      const candidate = truncatedContent.slice(0, lastBrace + 1) + ']';
-      const parsed = JSON.parse(candidate);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {
-      // Truly unrecoverable
-    }
-  }
-
-  return null;
-}
-
-/**
- * Parses a JSON response from the AI, with graceful error handling.
- * Returns null if parsing fails — the caller decides how to handle missing data.
- * For array responses, also attempts truncation recovery when the model hits its
- * output token limit and returns incomplete JSON.
- */
-function parseAiJsonResponse<ParsedType>(
-  aiResponseContent: string,
-  operationDescription: string,
-): ParsedType | null {
-  // Strip any accidental markdown fences the AI might include despite instructions
-  const cleanedContent = aiResponseContent
-    .replace(/^```(?:json)?\s*/m, '')
-    .replace(/\s*```\s*$/m, '')
-    .trim();
-
-  try {
-    return JSON.parse(cleanedContent) as ParsedType;
-  } catch (parseError) {
-    // When the response looks like a truncated JSON array, try to recover whatever
-    // complete items were emitted before the token limit cut the response short.
-    // This preserves partial flow results instead of discarding the entire batch.
-    if (cleanedContent.startsWith('[')) {
-      const recoveredItems = recoverTruncatedJsonArray(cleanedContent);
-      if (recoveredItems && recoveredItems.length > 0) {
-        logWarning(
-          `AI response for "${operationDescription}" was truncated at the token limit. ` +
-          `Recovered ${recoveredItems.length} item(s) from the partial response.`,
-        );
-        return recoveredItems as ParsedType;
-      }
-    }
-
-    logWarning(`Could not parse AI JSON response for "${operationDescription}": ${String(parseError)}`);
-    logDebug(`Raw AI response: ${aiResponseContent.slice(0, 500)}`);
-    return null;
-  }
-}
-
 // ── Component Intent Analysis ──────────────────────────────────────────────
 
 /**
@@ -258,10 +162,7 @@ async function analyzeComponentIntent(
     `component intent: ${componentAnalysis.componentName}`,
   );
 
-  return parseAiJsonResponse<ComponentIntentResponse>(
-    aiResponse.content,
-    `component intent for ${componentAnalysis.componentName}`,
-  );
+  return parseComponentIntentFromAiResponse(aiResponse.content);
 }
 
 // ── User Flow Assembly ─────────────────────────────────────────────────────
@@ -368,43 +269,48 @@ export async function mapComponentAnalysesToUserFlows(
 
   const allAiGeneratedFlows: AiGeneratedFlow[] = [];
 
-  for (let batchIndex = 0; batchIndex < componentBatches.length; batchIndex++) {
-    const currentBatch = componentBatches[batchIndex];
-    const batchEstimatedTokens = currentBatch.reduce(
-      (total, component) => total + estimateComponentOutputTokens(component),
-      BATCH_RESPONSE_OVERHEAD_TOKENS,
-    );
-    const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
-    logDebug(
-      `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
-    );
+  // Create a concurrency limiter with the provider's concurrency setting.
+  // GitHub Models and Copilot use limit=1 (sequential) to avoid rate-limit
+  // penalties. OpenAI and Anthropic use limit=5 for real throughput gains.
+  const batchConcurrencyLimit = pLimit(aiClient.concurrencyLimit);
 
-    const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
-
-    // Wrap each batch individually so a rate-limit failure on one batch does not
-    // abort the whole run. The remaining batches often succeed once the brief
-    // Copilot rate-limit window passes. Skipping a batch produces fewer flows
-    // but is far better than a complete failure with zero output.
-    let flowGenerationResponse;
-    try {
-      flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
-    } catch (batchError) {
-      logWarning(
-        `Batch ${batchIndex + 1}/${componentBatches.length} failed after all retries — skipping. ` +
-        `(${batchError instanceof Error ? batchError.message : String(batchError)})`,
+  const batchPromises = componentBatches.map((currentBatch, batchIndex) =>
+    batchConcurrencyLimit(async () => {
+      const batchEstimatedTokens = currentBatch.reduce(
+        (total, component) => total + estimateComponentOutputTokens(component),
+        BATCH_RESPONSE_OVERHEAD_TOKENS,
       );
-      continue;
-    }
+      const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
+      logDebug(
+        `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
+      );
 
-    const batchFlows = parseAiJsonResponse<AiGeneratedFlow[]>(
-      flowGenerationResponse.content,
-      batchLabel,
-    );
+      const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
 
+      let flowGenerationResponse;
+      try {
+        flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+      } catch (batchError) {
+        logWarning(
+          `Batch ${batchIndex + 1}/${componentBatches.length} failed after all retries — skipping. ` +
+          `(${batchError instanceof Error ? batchError.message : String(batchError)})`,
+        );
+        return null;
+      }
+
+      const batchFlows = parseFlowsFromAiResponse(flowGenerationResponse.content, batchLabel);
+      if (!batchFlows) {
+        logWarning(`Batch ${batchIndex + 1} returned no valid flows — skipping.`);
+      }
+      return batchFlows;
+    }),
+  );
+
+  const batchResults = await Promise.all(batchPromises);
+
+  for (const batchFlows of batchResults) {
     if (batchFlows && Array.isArray(batchFlows)) {
       allAiGeneratedFlows.push(...batchFlows);
-    } else {
-      logWarning(`Batch ${batchIndex + 1} returned no valid flows — skipping.`);
     }
   }
 

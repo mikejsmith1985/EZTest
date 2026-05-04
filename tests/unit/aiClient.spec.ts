@@ -461,3 +461,59 @@ test.describe('AiClient model rotation', () => {
     }
   });
 });
+
+// ── AiClient.concurrencyLimit ──────────────────────────────────────────────
+
+test.describe('AiClient.concurrencyLimit', () => {
+  /**
+   * GitHub Models aggressively rate-limits concurrent calls — sequential execution
+   * avoids compounding penalties that would turn a 15s wait into several minutes.
+   */
+  test('returns 1 for github provider to prevent rate-limit compounding', () => {
+    const aiClient = new AiClient(createGitHubProviderConfig());
+    expect(aiClient.concurrencyLimit).toBe(1);
+  });
+
+  /**
+   * The Copilot API uses a proactive inter-request delay (3 seconds) which makes
+   * parallel calls counterproductive — sequential keeps the cooldown predictable.
+   */
+  test('returns 1 for copilot provider to respect inter-request delay', () => {
+    const aiClient = new AiClient({
+      provider: 'copilot',
+      apiKey: 'copilot-via-gh-cli',
+      maxTokensPerCall: 4096,
+      maxRetryAttempts: 0,
+    });
+    expect(aiClient.concurrencyLimit).toBe(1);
+  });
+
+  /**
+   * OpenAI paid-tier accounts have generous rate limits — a concurrency of 5 gives
+   * meaningful throughput gains without triggering per-minute token-rate limits.
+   */
+  test('returns 5 for openai provider to enable concurrent batch requests', () => {
+    const aiClient = new AiClient(createOpenAiProviderConfig());
+    expect(aiClient.concurrencyLimit).toBe(5);
+  });
+
+  /** Anthropic paid accounts behave similarly to OpenAI — 5 concurrent is safe. */
+  test('returns 5 for anthropic provider to enable concurrent batch requests', () => {
+    const aiClient = new AiClient(createAnthropicProviderConfig());
+    expect(aiClient.concurrencyLimit).toBe(5);
+  });
+
+  /**
+   * The Gemini free tier allows some concurrency but is more restricted than
+   * paid OpenAI/Anthropic — 3 concurrent calls balances throughput against limits.
+   */
+  test('returns 3 for gemini provider to respect free-tier rate limits', () => {
+    const aiClient = new AiClient({
+      provider: 'gemini',
+      apiKey: 'fake-gemini-key',
+      maxTokensPerCall: 4096,
+      maxRetryAttempts: 0,
+    });
+    expect(aiClient.concurrencyLimit).toBe(3);
+  });
+});

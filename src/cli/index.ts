@@ -29,7 +29,7 @@ import { registerReplayCommand }    from './commands/replay.js';
 import { registerUiCommand }        from './commands/ui.js';
 import { registerMcpCommand }       from './commands/mcp.js';
 
-const EZTEST_VERSION = '0.1.4';
+const EZTEST_VERSION = '0.2.0';
 
 const cliProgram = new Command();
 

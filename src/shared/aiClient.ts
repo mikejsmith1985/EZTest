@@ -9,6 +9,11 @@ import type { AiConfig } from './config.js';
 import { getDefaultModelForProvider, GITHUB_FREE_MODEL_ROTATION, COPILOT_FREE_MODEL_ROTATION, GEMINI_MODEL_ROTATION, GEMINI_MAX_TOKENS_PER_CALL } from './config.js';
 import { logDebug, logWarning } from './logger.js';
 import { getCopilotSessionToken } from './copilotAuth.js';
+import { generateText } from 'ai';
+import type { ModelMessage } from 'ai';
+import { createOpenAI } from '@ai-sdk/openai';
+import { createAnthropic } from '@ai-sdk/anthropic';
+import { createGoogleGenerativeAI } from '@ai-sdk/google';
 
 // ── Quota Exhaustion Error ─────────────────────────────────────────────────
 
@@ -46,33 +51,29 @@ interface ProviderAdapter {
 // ── OpenAI Adapter ─────────────────────────────────────────────────────────
 
 /**
- * Adapter for the OpenAI API.
- * Uses dynamic import to avoid bundling the SDK when using Anthropic instead.
+ * Adapter for the OpenAI API using the Vercel AI SDK.
+ * maxRetries is left at the SDK default (0) so EZTest's own retry logic handles
+ * backoff and retry-after headers directly without the SDK double-retrying.
  */
 async function createOpenAiAdapter(apiKey: string): Promise<ProviderAdapter> {
-  const { default: OpenAI } = await import('openai');
-  // Disable the OpenAI SDK's built-in retry — EZTest has its own retry wrapper with
-  // exponential backoff and retry-after header support. Double-retrying compounds
-  // the wait time from GitHub Models rate-limit cooldowns from seconds to minutes.
-  const openAiClient = new OpenAI({ apiKey, maxRetries: 0 });
+  const openAiProvider = createOpenAI({ apiKey });
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
-      const response = await openAiClient.chat.completions.create({
-        model: modelName,
-        messages,
-        max_tokens: maxTokens,
+      const result = await generateText({
+        model: openAiProvider(modelName),
+        messages: messages as ModelMessage[],
+        maxOutputTokens: maxTokens,
       });
 
-      const firstChoice = response.choices[0];
-      if (!firstChoice?.message.content) {
+      if (!result.text) {
         throw new Error('OpenAI returned an empty response');
       }
 
       return {
-        content: firstChoice.message.content,
-        tokensUsed: response.usage?.total_tokens ?? 0,
-        modelUsed: response.model,
+        content: result.text,
+        tokensUsed: result.usage?.totalTokens ?? 0,
+        modelUsed: modelName,
       };
     },
   };
@@ -85,38 +86,31 @@ const GITHUB_MODELS_BASE_URL = 'https://models.inference.ai.azure.com';
 
 /**
  * Adapter for the GitHub Models API (used by GitHub Copilot subscribers).
- * Reuses the OpenAI SDK since GitHub Models is OpenAI-spec compatible.
+ * Reuses @ai-sdk/openai with a custom baseURL since GitHub Models is OpenAI-spec compatible.
  * Authentication is a GitHub Personal Access Token with the `models:read` scope.
  */
 async function createGitHubCopilotAdapter(githubToken: string): Promise<ProviderAdapter> {
-  const { default: OpenAI } = await import('openai');
-
-  // The OpenAI SDK accepts a custom baseURL + any token format in apiKey —
-  // GitHub Models validates the Bearer token server-side, not the SDK itself.
-  // maxRetries: 0 — EZTest's own retry wrapper handles retries with retry-after support.
-  const githubModelsClient = new OpenAI({
+  const githubModelsProvider = createOpenAI({
     apiKey: githubToken,
     baseURL: GITHUB_MODELS_BASE_URL,
-    maxRetries: 0,
   });
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
-      const response = await githubModelsClient.chat.completions.create({
-        model: modelName,
-        messages,
-        max_tokens: maxTokens,
+      const result = await generateText({
+        model: githubModelsProvider(modelName),
+        messages: messages as ModelMessage[],
+        maxOutputTokens: maxTokens,
       });
 
-      const firstChoice = response.choices[0];
-      if (!firstChoice?.message.content) {
+      if (!result.text) {
         throw new Error('GitHub Models API returned an empty response');
       }
 
       return {
-        content: firstChoice.message.content,
-        tokensUsed: response.usage?.total_tokens ?? 0,
-        modelUsed: response.model,
+        content: result.text,
+        tokensUsed: result.usage?.totalTokens ?? 0,
+        modelUsed: modelName,
       };
     },
   };
@@ -221,37 +215,29 @@ async function createCopilotChatApiAdapter(): Promise<ProviderAdapter> {
 // ── Anthropic Adapter ──────────────────────────────────────────────────────
 
 /**
- * Handles the Anthropic message format difference (system message is a top-level field).
+ * Adapter for the Anthropic API using the Vercel AI SDK.
+ * @ai-sdk/anthropic handles the system-message separation automatically —
+ * no need to manually split system messages from the conversation array.
  */
 async function createAnthropicAdapter(apiKey: string): Promise<ProviderAdapter> {
-  const { default: Anthropic } = await import('@anthropic-ai/sdk');
-  const anthropicClient = new Anthropic({ apiKey });
+  const anthropicProvider = createAnthropic({ apiKey });
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
-      // Anthropic separates the system message from the conversation messages
-      const systemMessage = messages.find(message => message.role === 'system');
-      const conversationMessages = messages.filter(message => message.role !== 'system');
-
-      const response = await anthropicClient.messages.create({
-        model: modelName,
-        max_tokens: maxTokens,
-        system: systemMessage?.content,
-        messages: conversationMessages.map(message => ({
-          role: message.role as 'user' | 'assistant',
-          content: message.content,
-        })),
+      const result = await generateText({
+        model: anthropicProvider(modelName),
+        messages: messages as ModelMessage[],
+        maxOutputTokens: maxTokens,
       });
 
-      const firstContentBlock = response.content[0];
-      if (!firstContentBlock || firstContentBlock.type !== 'text') {
-        throw new Error('Anthropic returned an empty or non-text response');
+      if (!result.text) {
+        throw new Error('Anthropic returned an empty response');
       }
 
       return {
-        content: firstContentBlock.text,
-        tokensUsed: response.usage.input_tokens + response.usage.output_tokens,
-        modelUsed: response.model,
+        content: result.text,
+        tokensUsed: result.usage?.totalTokens ?? 0,
+        modelUsed: modelName,
       };
     },
   };
@@ -260,43 +246,30 @@ async function createAnthropicAdapter(apiKey: string): Promise<ProviderAdapter> 
 // ── Google Gemini Adapter ───────────────────────────────────────────────────
 
 /**
- * Base URL for the Google Gemini API's OpenAI-compatible endpoint.
- * Using the standard OpenAI SDK means no extra npm dependency is required —
- * only the base URL and API key change from the OpenAI adapter.
- */
-const GEMINI_API_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
-
-/**
- * Adapter for the Google Gemini API using its OpenAI-compatible chat endpoint.
+ * Adapter for the Google Gemini API using the native @ai-sdk/google provider.
+ * This uses the native Gemini API (generativelanguage.googleapis.com) rather than
+ * the OpenAI-compatible shim, giving better reliability and clearer error messages.
  * Get a free API key at: https://aistudio.google.com/app/apikey
  */
 async function createGeminiAdapter(apiKey: string): Promise<ProviderAdapter> {
-  const { default: OpenAI } = await import('openai');
-
-  // maxRetries: 0 — EZTest handles retries via executeWithRetry with backoff support.
-  const geminiClient = new OpenAI({
-    apiKey,
-    baseURL: GEMINI_API_BASE_URL,
-    maxRetries: 0,
-  });
+  const geminiProvider = createGoogleGenerativeAI({ apiKey });
 
   return {
     async sendMessages(messages, modelName, maxTokens) {
-      const response = await geminiClient.chat.completions.create({
-        model: modelName,
-        messages,
-        max_tokens: maxTokens,
+      const result = await generateText({
+        model: geminiProvider(modelName),
+        messages: messages as ModelMessage[],
+        maxOutputTokens: maxTokens,
       });
 
-      const firstChoice = response.choices[0];
-      if (!firstChoice?.message.content) {
+      if (!result.text) {
         throw new Error('Gemini API returned an empty response');
       }
 
       return {
-        content: firstChoice.message.content,
-        tokensUsed: response.usage?.total_tokens ?? 0,
-        modelUsed: response.model,
+        content: result.text,
+        tokensUsed: result.usage?.totalTokens ?? 0,
+        modelUsed: modelName,
       };
     },
   };
@@ -325,6 +298,9 @@ const MAX_RETRYABLE_DELAY_MS = 300_000; // 5 minutes — anything longer signals
  * The Copilot API (api.githubcopilot.com) intermittently returns 403 "forbidden"
  * under rate-limiting conditions instead of the standard 429 — we treat these as
  * transient and retry with backoff.
+ *
+ * Supports both the OpenAI SDK error shape (error.status) and the Vercel AI SDK
+ * error shape (error.statusCode) so adapters can be migrated independently.
  */
 function isTransientApiError(error: unknown): boolean {
   if (error instanceof Error) {
@@ -340,12 +316,40 @@ function isTransientApiError(error: unknown): boolean {
       return true;
     }
   }
-  // Check for HTTP status-based errors (varies by SDK)
-  if (typeof error === 'object' && error !== null && 'status' in error) {
-    const httpStatus = (error as { status: number }).status;
-    return RETRYABLE_STATUS_CODES.has(httpStatus) || httpStatus === 413;
+  // Check for HTTP status-based errors — support both SDK shapes
+  if (typeof error === 'object' && error !== null) {
+    const errorWithStatus = error as { status?: number; statusCode?: number };
+    const httpStatus = errorWithStatus.status ?? errorWithStatus.statusCode;
+    if (httpStatus !== undefined) {
+      return RETRYABLE_STATUS_CODES.has(httpStatus) || httpStatus === 413;
+    }
   }
   return false;
+}
+
+/**
+ * Extracts the raw retry-after header value from an error, supporting both
+ * the OpenAI SDK error shape (error.headers) and the Vercel AI SDK error shape
+ * (error.responseHeaders). Returns undefined when no retry-after header is present.
+ */
+function extractRetryAfterHeaderValue(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const errorWithHeaders = error as {
+    headers?: Headers | Record<string, string>;
+    responseHeaders?: Record<string, string>;
+  };
+
+  // Vercel AI SDK: responseHeaders is a plain Record<string, string>
+  if (errorWithHeaders.responseHeaders) {
+    return errorWithHeaders.responseHeaders['retry-after'] ?? undefined;
+  }
+
+  // OpenAI SDK: headers is either a Headers object or a plain Record<string, string>
+  if (!errorWithHeaders.headers) return undefined;
+  if (errorWithHeaders.headers instanceof Headers) {
+    return errorWithHeaders.headers.get('retry-after') ?? undefined;
+  }
+  return (errorWithHeaders.headers as Record<string, string>)['retry-after'] ?? undefined;
 }
 
 /**
@@ -358,17 +362,7 @@ function isTransientApiError(error: unknown): boolean {
  * MAX_RETRYABLE_DELAY_MS (which signals daily quota exhaustion, not a short rate limit).
  */
 function extractRetryAfterDelayMs(error: unknown): number | null {
-  if (typeof error !== 'object' || error === null) return null;
-  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
-  if (!errorWithHeaders.headers) return null;
-
-  let retryAfterValue: string | null | undefined;
-  if (errorWithHeaders.headers instanceof Headers) {
-    retryAfterValue = errorWithHeaders.headers.get('retry-after');
-  } else if (typeof errorWithHeaders.headers === 'object') {
-    retryAfterValue = (errorWithHeaders.headers as Record<string, string>)['retry-after'];
-  }
-
+  const retryAfterValue = extractRetryAfterHeaderValue(error);
   if (!retryAfterValue) return null;
 
   const retryAfterSeconds = parseFloat(retryAfterValue);
@@ -396,17 +390,7 @@ function extractRetryAfterDelayMs(error: unknown): number | null {
  * can display a human-readable countdown to the user.
  */
 function extractRetryAfterSeconds(error: unknown): number {
-  if (typeof error !== 'object' || error === null) return 0;
-  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
-  if (!errorWithHeaders.headers) return 0;
-
-  let retryAfterValue: string | null | undefined;
-  if (errorWithHeaders.headers instanceof Headers) {
-    retryAfterValue = errorWithHeaders.headers.get('retry-after');
-  } else {
-    retryAfterValue = (errorWithHeaders.headers as Record<string, string>)['retry-after'];
-  }
-
+  const retryAfterValue = extractRetryAfterHeaderValue(error);
   if (!retryAfterValue) return 0;
   const retryAfterSeconds = parseFloat(retryAfterValue);
   return isNaN(retryAfterSeconds) ? 0 : Math.max(0, retryAfterSeconds);
@@ -418,13 +402,7 @@ function extractRetryAfterSeconds(error: unknown): number {
  * (extractRetryAfterDelayMs returned null because the delay was too long to honor).
  */
 function hasRetryAfterHeader(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const errorWithHeaders = error as { headers?: Headers | Record<string, string> };
-  if (!errorWithHeaders.headers) return false;
-  if (errorWithHeaders.headers instanceof Headers) {
-    return errorWithHeaders.headers.has('retry-after');
-  }
-  return 'retry-after' in (errorWithHeaders.headers as Record<string, string>);
+  return extractRetryAfterHeaderValue(error) !== undefined;
 }
 
 /**
@@ -701,5 +679,22 @@ export class AiClient {
     }
     // GitHub Models, OpenAI, Anthropic all use the configured maxTokensPerCall
     return Math.floor(this.aiConfig.maxTokensPerCall * BUDGET_MARGIN);
+  }
+
+  /**
+   * Returns the maximum number of batch requests that may be in-flight simultaneously.
+   * This is provider-specific: rate-limited providers (GitHub Models, Copilot) need
+   * sequential calls (limit=1) while paid providers (OpenAI, Anthropic, Gemini) can
+   * handle modest concurrency without triggering rate limits.
+   */
+  get concurrencyLimit(): number {
+    if (this.aiConfig.provider === 'github' || this.aiConfig.provider === 'copilot') {
+      return 1; // sequential — these providers aggressively rate-limit concurrent calls
+    }
+    if (this.aiConfig.provider === 'gemini') {
+      return 3; // Gemini free tier allows modest concurrency
+    }
+    // OpenAI and Anthropic support higher concurrency on paid plans
+    return 5;
   }
 }
