@@ -1020,6 +1020,8 @@ export function buildWizardPageHtml(): string {
         <div class="run-done-actions">
           <!-- Shown after a successful generate run -->
           <button class="run-action-btn" id="run-tests-btn"   style="display:none" onclick="startRunTests()">&#9654; Run Tests</button>
+          <!-- Shown after a test run that had failures — re-runs generate with AI selector fixing -->
+          <button class="run-action-btn" id="fix-tests-btn"   style="display:none" onclick="startRunAndFix()">&#128295; Fix Failing Tests</button>
           <!-- Shown after a successful test run -->
           <button class="run-action-btn is-secondary" id="open-report-btn" style="display:none" onclick="openPlaywrightReport()">&#128202; Open Report</button>
           <button class="btn-ghost" onclick="closeRunModal()">Close</button>
@@ -1844,6 +1846,7 @@ export function buildWizardPageHtml(): string {
       document.getElementById('run-terminal').innerHTML    = '';
       document.getElementById('run-done-bar').style.display  = 'none';
       document.getElementById('run-tests-btn').style.display  = 'none';
+      document.getElementById('fix-tests-btn').style.display  = 'none';
       document.getElementById('open-report-btn').style.display = 'none';
       document.getElementById('run-cancel-btn').style.display = 'block';
       document.getElementById('run-modal').style.display     = 'flex';
@@ -2042,7 +2045,20 @@ export function buildWizardPageHtml(): string {
     }
 
     /**
-     * Sends the last test run's working directory to the server so it can open
+     * Re-runs the last generate config with the run-and-fix flag enabled.
+     * EZTest will re-generate the tests, then run each one and use AI to
+     * rewrite any selectors that don't match the live DOM — no manual
+     * terminal command needed.
+     */
+    function startRunAndFix() {
+      if (!lastGenerateRunConfig) { return; }
+      startRun(
+        'Fixing failing tests\u2026',
+        Object.assign({}, lastGenerateRunConfig, { runAndFix: true }),
+      );
+    }
+
+    /**
      * the Playwright HTML report (playwright-report/index.html) in the default browser.
      */
     function openPlaywrightReport() {
@@ -2110,6 +2126,10 @@ export function buildWizardPageHtml(): string {
           lastTestRunWorkingDir = currentRunConfig.workingDir || null;
           document.getElementById('open-report-btn').style.display = 'inline-block';
           document.getElementById('btn-open-last-report').style.display = 'block';
+          // Offer AI selector fixing when the last generate config is available to re-run
+          if (lastGenerateRunConfig) {
+            document.getElementById('fix-tests-btn').style.display = 'inline-block';
+          }
         }
       }
     });
