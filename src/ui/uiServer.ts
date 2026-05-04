@@ -341,33 +341,33 @@ let activeChildProcess: ChildProcess | null = null;
 /**
  * Infers a log level from a line of CLI output text by looking for well-known
  * symbols and keywords. Falls back to 'info' when nothing specific is found.
+ *
+ * Design principle: red should only appear for genuine failures the user needs to act on.
+ * Retry/rate-limit messages, file paths containing "error", and similar informational
+ * lines should never be coloured red. The ⚠ check intentionally runs before the error
+ * check so that EZTest's warning-prefixed retry lines are always yellow, not red.
  */
 function detectLogLevel(outputLine: string): LogLevel {
   const lowerLine = outputLine.toLowerCase();
 
-  // Check success indicators first — they contain symbols not in other levels
+  // ── Success ──────────────────────────────────────────────────────────────
+  // Check success first — EZTest ✓ and Playwright "ok N" passing-test prefix.
   if (
     outputLine.includes('✓') ||
     outputLine.includes('✅') ||
+    /^\s*ok\s+\d+\s/.test(outputLine) ||     // Playwright: "ok 1 tests/…"
     lowerLine.includes('success') ||
-    lowerLine.includes('done') ||
     lowerLine.includes('passed') ||
     lowerLine.includes('generated') ||
-    lowerLine.includes('saved')
+    lowerLine.includes('saved') ||
+    lowerLine.includes('done')
   ) {
     return 'success';
   }
 
-  if (
-    outputLine.includes('✗') ||
-    lowerLine.includes('error') ||
-    lowerLine.includes('failed') ||
-    lowerLine.includes('error:') ||
-    lowerLine.includes('throw')
-  ) {
-    return 'error';
-  }
-
+  // ── Warning ───────────────────────────────────────────────────────────────
+  // Warnings come before the error check so that EZTest retry lines (which carry ⚠)
+  // are never misclassified as errors just because they contain the word "failed".
   if (
     outputLine.includes('⚠') ||
     lowerLine.includes('warn') ||
@@ -376,6 +376,21 @@ function detectLogLevel(outputLine: string): LogLevel {
     return 'warning';
   }
 
+  // ── Error ─────────────────────────────────────────────────────────────────
+  // Be precise: only flag as red when it is a genuine failure, not when the word
+  // "error" happens to appear inside a file path or a retry-progress message.
+  if (
+    outputLine.includes('✗') ||
+    /^\s*x\s+\d+\s/.test(outputLine) ||          // Playwright: "x 4 tests/…" (failing test)
+    /(?:^|\])\s*error:/i.test(outputLine) ||      // "Error: …" or "][error:" Node/TS messages
+    /\b\d+\s+failed\b/i.test(outputLine) ||       // "10 failed" Playwright suite summary
+    lowerLine.startsWith('throw ') ||             // thrown exception in a stack trace
+    lowerLine.includes('uncaughtexception')        // Node unhandled rejection notice
+  ) {
+    return 'error';
+  }
+
+  // ── Debug ─────────────────────────────────────────────────────────────────
   if (lowerLine.includes('debug') || lowerLine.includes('[debug]')) {
     return 'debug';
   }

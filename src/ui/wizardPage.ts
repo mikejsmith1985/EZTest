@@ -20,6 +20,7 @@ const COLOR_ACCENT   = '#7c3aed';
 const COLOR_SUCCESS  = '#3fb950';
 const COLOR_ERROR    = '#f85149';
 const COLOR_WARNING  = '#e3b341';
+const COLOR_INFO     = '#79c0ff'; // Blue — clearly informational, not an error or warning
 const COLOR_PRIMARY  = '#e6edf3';
 const COLOR_MUTED    = '#8b949e';
 
@@ -615,7 +616,7 @@ export function buildWizardPageHtml(): string {
       min-height: 320px;
       background: #010409;
     }
-    .log-info    { color: ${COLOR_PRIMARY}; }
+    .log-info    { color: ${COLOR_INFO};    }
     .log-success { color: ${COLOR_SUCCESS}; }
     .log-error   { color: ${COLOR_ERROR};   }
     .log-warning { color: ${COLOR_WARNING}; }
