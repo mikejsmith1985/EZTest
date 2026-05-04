@@ -618,4 +618,22 @@ export class AiClient {
   get hasFreeTierQuotaLimits(): boolean {
     return this.aiConfig.provider === 'github';
   }
+
+  /**
+   * Returns the effective output-token budget per flow-mapping batch for this provider.
+   *
+   * The Copilot API supports 16 384 output tokens per call — over 4× the GitHub Models
+   * cap of 4 096. Using the correct budget per provider dramatically reduces the number
+   * of batch calls needed (22 → ~5 for a typical 26-component app on Copilot).
+   *
+   * Value is 90% of the provider's hard cap, leaving a margin for response verbosity.
+   */
+  get flowBatchOutputBudget(): number {
+    const BUDGET_MARGIN = 0.9;
+    if (this.aiConfig.provider === 'copilot') {
+      return Math.floor(COPILOT_MAX_OUTPUT_TOKENS * BUDGET_MARGIN); // ~14 745
+    }
+    // GitHub Models, OpenAI, Anthropic all use the configured maxTokensPerCall
+    return Math.floor(this.aiConfig.maxTokensPerCall * BUDGET_MARGIN);
+  }
 }

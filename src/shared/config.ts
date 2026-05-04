@@ -225,9 +225,12 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     }
     // copilot provider authenticates via `gh auth token` — no env var key needed.
     // Set a sentinel apiKey so the AiClient initialize() guard doesn't reject it.
+    // Also raise maxTokensPerCall to the Copilot API's 16 384-token output cap so
+    // the provider-aware batch budget (flowBatchOutputBudget) can use the full limit.
     if (requestedProvider === 'copilot') {
-      environmentOverrides.apiKey  = 'copilot-via-gh-cli';
-      environmentOverrides.provider = 'copilot';
+      environmentOverrides.apiKey          = 'copilot-via-gh-cli';
+      environmentOverrides.provider        = 'copilot';
+      environmentOverrides.maxTokensPerCall = 16_384;
     }
     // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
     // whatever provider/key was detected from the keys that ARE present.

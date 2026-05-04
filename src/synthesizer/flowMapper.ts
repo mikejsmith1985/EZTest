@@ -21,11 +21,15 @@ import { logDebug, logWarning } from '../shared/logger.js';
 // ── Dynamic Batch Sizing ───────────────────────────────────────────────────
 
 /**
- * Target output token budget per batch — 90% of the Copilot Pro 4096-token output cap.
- * Leaving a 10% margin accounts for variation in AI response verbosity.
- * This is the output cap — it applies regardless of which model is active.
+ * Target output token budget per batch — 90% of the model's output cap, leaving
+ * a margin for AI response verbosity. This DEFAULT is for GitHub Models (4 096 tokens).
+ *
+ * The actual value used at runtime is driven by the provider via AiClient.flowBatchOutputBudget:
+ *   - GitHub Models:  ~3 600 tokens → typically 6–8 components per batch
+ *   - Copilot API:   ~14 745 tokens → typically 20–26 components per batch (often 1 call total)
+ *   - OpenAI/Anthropic: scales with their configured maxTokensPerCall
  */
-const TARGET_BATCH_OUTPUT_TOKENS = 3600;
+const DEFAULT_BATCH_OUTPUT_TOKENS = 3600;
 
 /**
  * Fixed token overhead per batch response: JSON array brackets, whitespace,
@@ -55,17 +59,22 @@ export function estimateComponentOutputTokens(componentAnalysis: ComponentAnalys
 
 /**
  * Splits components into batches where each batch's estimated output token cost
- * stays within TARGET_BATCH_OUTPUT_TOKENS (90% of the model's output cap).
+ * stays within the given targetOutputTokens budget.
  *
  * Unlike a fixed batch size, this adapts to component complexity:
  *   - A component with 1 element generates ~3 flow variants ≈ 660 tokens → fits 5 per batch
  *   - A component with 10 elements generates ~15 flow variants ≈ 3300 tokens → 1 per batch
+ *
+ * The budget is provider-specific:
+ *   - GitHub Models (4K output cap):  targetOutputTokens ≈ 3 600  → ~6–8 components/batch
+ *   - Copilot API   (16K output cap): targetOutputTokens ≈ 14 745 → all 26 often fit in 1 batch
  *
  * A component that alone exceeds the budget is placed in its own batch — we cannot
  * split a single component further without losing cross-element flow context.
  */
 export function splitIntoDynamicBatches(
   componentAnalyses: ComponentAnalysis[],
+  targetOutputTokens: number = DEFAULT_BATCH_OUTPUT_TOKENS,
 ): ComponentAnalysis[][] {
   const batches: ComponentAnalysis[][] = [];
   let currentBatch: ComponentAnalysis[] = [];
@@ -77,7 +86,7 @@ export function splitIntoDynamicBatches(
     // Start a new batch if adding this component would exceed the token budget.
     // If the current batch is empty, include it anyway — a single very-complex
     // component cannot be split, and the recovery logic handles any overflow.
-    if (currentBatch.length > 0 && currentBatchTokens + componentTokenCost > TARGET_BATCH_OUTPUT_TOKENS) {
+    if (currentBatch.length > 0 && currentBatchTokens + componentTokenCost > targetOutputTokens) {
       batches.push(currentBatch);
       currentBatch = [];
       currentBatchTokens = BATCH_RESPONSE_OVERHEAD_TOKENS;
@@ -313,8 +322,9 @@ export interface FlowMapperOptions {
  * Maps a set of ComponentAnalysis objects into UserFlow objects by using AI
  * to understand the connections between components and the journeys users take.
  *
- * Components are processed in batches to stay within the GitHub Models API
- * 8K-token-per-request limit. Flows from all batches are merged and returned.
+ * Components are processed in provider-aware batches. The Copilot API's 16 384-token
+ * output cap lets most apps complete flow mapping in a single batch; GitHub Models'
+ * 4 096-token cap requires more, smaller batches. Flows from all batches are merged.
  *
  * This is the bridge between raw code analysis and test generation.
  */
@@ -342,10 +352,11 @@ export async function mapComponentAnalysesToUserFlows(
     }
   }
 
-  // Split components into token-aware batches so no single API call exceeds the
-  // output token cap. Dynamic batching accounts for component complexity — a form
-  // with 10 inputs generates far more flows than a single-button component.
-  const componentBatches = splitIntoDynamicBatches(componentAnalyses);
+  // Split components into provider-aware token batches. The Copilot API supports
+  // 16 384 output tokens vs GitHub Models' 4 096, so the same 26-component app
+  // that needs 22 batches on GitHub Models can fit into 5–6 on Copilot.
+  const batchOutputBudget = aiClient.flowBatchOutputBudget;
+  const componentBatches = splitIntoDynamicBatches(componentAnalyses, batchOutputBudget);
   const totalEstimatedTokens = componentAnalyses.reduce(
     (total, component) => total + estimateComponentOutputTokens(component),
     0,
