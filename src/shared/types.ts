@@ -6,7 +6,7 @@
 // ── AI Provider Types ──────────────────────────────────────────────────────
 
 /** The supported AI model providers. Add new providers here as they become viable. */
-export type AiProviderName = 'openai' | 'anthropic' | 'github' | 'copilot';
+export type AiProviderName = 'openai' | 'anthropic' | 'github' | 'copilot' | 'gemini';
 
 /** A single message in an AI conversation context. */
 export interface AiMessage {

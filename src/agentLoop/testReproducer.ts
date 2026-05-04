@@ -116,8 +116,7 @@ export async function generateAndRunReproductionTest(
   const wasReproductionSuccessful = !testRunResult.didAllTestsPass;
 
   if (wasReproductionSuccessful) {
-    logSuccess(`[Reproduce] Bug confirmed. Test failed as expected (exit code ${testRunResult.exitCode})`);
-    logInfo(`[Reproduce] Reproduction test saved at: ${testFilePath}`);
+    logSuccess(`[Reproduce] Bug confirmed. Test failed as expected — reproduction saved at: ${testFilePath}`);
   } else {
     logWarning(
       `[Reproduce] Test passed when it should have failed. ` +

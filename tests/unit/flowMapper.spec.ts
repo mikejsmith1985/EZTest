@@ -88,6 +88,7 @@ const SAMPLE_FLOW_GENERATION_RESPONSE = JSON.stringify([
 /**
  * Creates a mock AiClient that returns a predetermined response.
  * The `callCount` ref tracks how many times the AI was called.
+ * Includes concurrencyLimit and flowBatchOutputBudget so the p-limit migration works.
  */
 function createMockAiClient(responseContent: string, callCount = { value: 0 }): AiClient {
   return {
@@ -98,6 +99,8 @@ function createMockAiClient(responseContent: string, callCount = { value: 0 }): 
     initialize: async () => {},
     providerName: 'mock',
     modelName: 'mock',
+    concurrencyLimit: 5,
+    flowBatchOutputBudget: 3600,
   } as unknown as AiClient;
 }
 
@@ -342,5 +345,108 @@ test.describe('splitIntoDynamicBatches', () => {
       const isForcedSingleComponent = batch.length === 1;
       expect(isWithinBudget || isForcedSingleComponent).toBe(true);
     }
+  });
+});
+
+// ── mapComponentAnalysesToUserFlows — concurrency ─────────────────────────
+
+test.describe('mapComponentAnalysesToUserFlows — concurrency', () => {
+  /**
+   * When concurrencyLimit > 1, batches that each take ~50ms should overlap in time,
+   * meaning more than one chat() call is active at the same instant.
+   */
+  test('processes multiple batches concurrently when concurrencyLimit > 1', async () => {
+    let activeCallCount = 0;
+    let maxConcurrentCallCount = 0;
+
+    // Small budget (660 tokens) forces one component per batch.
+    // With 6 components and concurrencyLimit=3, we expect overlap.
+    const concurrentMockClient = {
+      chat: async () => {
+        activeCallCount++;
+        maxConcurrentCallCount = Math.max(maxConcurrentCallCount, activeCallCount);
+        // Simulate 50ms of AI latency per batch
+        await new Promise(resolve => setTimeout(resolve, 50));
+        activeCallCount--;
+        return { content: SAMPLE_FLOW_GENERATION_RESPONSE, tokensUsed: 100, modelUsed: 'mock' };
+      },
+      initialize: async () => {},
+      providerName: 'mock',
+      modelName: 'mock',
+      concurrencyLimit: 3,
+      flowBatchOutputBudget: 660, // forces 1 component per batch
+    } as unknown as AiClient;
+
+    const components = Array.from({ length: 6 }, (_, componentIndex) =>
+      createMockComponentAnalysis(`Component${componentIndex + 1}`, `/route${componentIndex + 1}`)
+    );
+
+    await mapComponentAnalysesToUserFlows(components, concurrentMockClient, {
+      targetAppUrl: 'http://localhost:3000',
+      shouldAnalyzeIndividualComponents: false,
+    });
+
+    // With concurrencyLimit=3 and 50ms delay, calls should overlap
+    expect(maxConcurrentCallCount).toBeGreaterThan(1);
+  });
+
+  /**
+   * When concurrencyLimit = 1, only one batch is processed at a time — verified by
+   * checking that the peak concurrent call count never exceeds 1.
+   */
+  test('processes batches sequentially when concurrencyLimit is 1', async () => {
+    let activeCallCount = 0;
+    let maxConcurrentCallCount = 0;
+
+    const sequentialMockClient = {
+      chat: async () => {
+        activeCallCount++;
+        maxConcurrentCallCount = Math.max(maxConcurrentCallCount, activeCallCount);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        activeCallCount--;
+        return { content: SAMPLE_FLOW_GENERATION_RESPONSE, tokensUsed: 100, modelUsed: 'mock' };
+      },
+      initialize: async () => {},
+      providerName: 'mock',
+      modelName: 'mock',
+      concurrencyLimit: 1,
+      flowBatchOutputBudget: 660, // forces multiple batches
+    } as unknown as AiClient;
+
+    const components = Array.from({ length: 4 }, (_, componentIndex) =>
+      createMockComponentAnalysis(`Component${componentIndex + 1}`)
+    );
+
+    await mapComponentAnalysesToUserFlows(components, sequentialMockClient, {
+      targetAppUrl: 'http://localhost:3000',
+      shouldAnalyzeIndividualComponents: false,
+    });
+
+    // Sequential: only 1 call active at a time
+    expect(maxConcurrentCallCount).toBe(1);
+  });
+});
+
+// ── mapComponentAnalysesToUserFlows — Zod validation ─────────────────────
+
+test.describe('mapComponentAnalysesToUserFlows — Zod validation', () => {
+  /**
+   * Flows missing required fields (steps, involvedComponents, testPriority) must be
+   * rejected by Zod validation and result in an empty flows list, not a partial object.
+   */
+  test('returns empty array when AI returns a flow with missing required fields', async () => {
+    // Missing 'steps', 'involvedComponents', and 'testPriority' — Zod must reject this
+    const invalidFlowResponse = JSON.stringify([
+      { flowName: 'Test flow', startingRoute: '/', flowKind: 'happy-path' },
+    ]);
+    const mockAiClient = createMockAiClient(invalidFlowResponse);
+
+    const userFlows = await mapComponentAnalysesToUserFlows(
+      [createMockComponentAnalysis('TestComponent')],
+      mockAiClient,
+      { targetAppUrl: 'http://localhost:3000', shouldAnalyzeIndividualComponents: false },
+    );
+
+    expect(userFlows).toEqual([]);
   });
 });

@@ -562,6 +562,8 @@ Output ONLY the corrected TypeScript test file. No explanation outside the inlin
  * @param playwrightErrorOutput - Raw output from the Playwright test run
  * @param targetAppUrl - The URL the tests run against
  * @param appSpec - Optional app spec for additional context
+ * @param ariaSnapshot - Optional YAML accessibility tree snapshot of the current page state.
+ *   When provided, the AI can use real element names from the snapshot instead of guessing.
  */
 export function buildTestRegenerationPrompt(
   userFlow: UserFlow,
@@ -569,9 +571,14 @@ export function buildTestRegenerationPrompt(
   playwrightErrorOutput: string,
   targetAppUrl: string,
   appSpec?: string,
+  ariaSnapshot?: string,
 ): AiMessage[] {
   // Truncate the error output to keep token usage bounded
   const truncatedErrorOutput = playwrightErrorOutput.slice(0, 3000);
+
+  // Truncate the aria snapshot to keep total prompt tokens bounded.
+  // 4000 chars is enough to cover most pages without exhausting the context window.
+  const truncatedAriaSnapshot = ariaSnapshot ? ariaSnapshot.slice(0, 4000) : undefined;
 
   return [
     {
@@ -597,7 +604,12 @@ PLAYWRIGHT ERROR OUTPUT:
 \`\`\`
 ${truncatedErrorOutput}
 \`\`\`
-
+${truncatedAriaSnapshot ? `
+CURRENT PAGE ACCESSIBILITY TREE (use these element names for selectors):
+\`\`\`yaml
+${truncatedAriaSnapshot}
+\`\`\`
+` : ''}
 DIAGNOSIS RULES:
 1. If the error is "locator not found" or "element not visible" → the selector guessed wrong. Fix by:
    - Use more flexible text matchers: getByText('partial text', { exact: false })

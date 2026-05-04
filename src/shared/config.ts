@@ -168,6 +168,8 @@ const PROVIDER_KEY_ENV_VARS: Record<AiProviderName, string> = {
   // Copilot provider uses the same GitHub token — the difference is the endpoint
   // (api.githubcopilot.com instead of models.inference.ai.azure.com) and auth flow.
   copilot:   'EZTEST_GITHUB_TOKEN',
+  // Google Gemini uses its own key from https://aistudio.google.com/app/apikey
+  gemini:    'GOOGLE_API_KEY',
 };
 
 /**
@@ -188,15 +190,16 @@ function resolveApiKeyForProvider(provider: AiProviderName): string | null {
  * Priority order (later wins):
  *   1. OPENAI_API_KEY present → provider=openai
  *   2. ANTHROPIC_API_KEY present → provider=anthropic
- *   3. EZTEST_GITHUB_TOKEN / GITHUB_MODELS_TOKEN present → provider=github
- *   4. EZTEST_AI_PROVIDER explicit → ONLY applied when the matching API key is also set.
+ *   3. GOOGLE_API_KEY present → provider=gemini
+ *   4. EZTEST_GITHUB_TOKEN / GITHUB_MODELS_TOKEN present → provider=github
+ *   5. EZTEST_AI_PROVIDER explicit → ONLY applied when the matching API key is also set.
  *      This prevents a stale EZTEST_AI_PROVIDER=openai from overriding a live GitHub token
  *      when the user has no OpenAI key configured.
  */
 function readAiConfigFromEnvironment(): Partial<AiConfig> {
   const environmentOverrides: Partial<AiConfig> = {};
 
-  // Step 1–3: Provider inferred from which keys are present
+  // Steps 1–4: Provider inferred from which keys are present
   if (process.env['OPENAI_API_KEY']) {
     environmentOverrides.apiKey = process.env['OPENAI_API_KEY'];
     environmentOverrides.provider = 'openai';
@@ -205,6 +208,13 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     environmentOverrides.apiKey = process.env['ANTHROPIC_API_KEY'];
     environmentOverrides.provider = 'anthropic';
   }
+  if (process.env['GOOGLE_API_KEY']) {
+    // Google Gemini sits between Anthropic and GitHub in auto-detection priority.
+    // Uses the OpenAI-compatible endpoint so no extra SDK dependency is needed.
+    environmentOverrides.apiKey = process.env['GOOGLE_API_KEY'];
+    environmentOverrides.provider = 'gemini';
+    environmentOverrides.maxTokensPerCall = GEMINI_MAX_TOKENS_PER_CALL;
+  }
   if (process.env['EZTEST_GITHUB_TOKEN'] ?? process.env['GITHUB_MODELS_TOKEN']) {
     // GitHub Copilot (via GitHub Models API) takes highest precedence among key-based detection —
     // most users will have this via their Copilot subscription without needing a paid API key
@@ -212,7 +222,7 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     environmentOverrides.provider = 'github';
   }
 
-  // Step 4: Explicit provider override — only honoured when the matching key is available.
+  // Step 5: Explicit provider override — only honoured when the matching key is available.
   // A stale EZTEST_AI_PROVIDER=openai (e.g. written by a previous UI config session) must NOT
   // override a valid GitHub token. If the user truly wants to switch providers they must also
   // have the matching API key present.
@@ -225,9 +235,16 @@ function readAiConfigFromEnvironment(): Partial<AiConfig> {
     }
     // copilot provider authenticates via `gh auth token` — no env var key needed.
     // Set a sentinel apiKey so the AiClient initialize() guard doesn't reject it.
+    // Also raise maxTokensPerCall to the Copilot API's 16 384-token output cap so
+    // the provider-aware batch budget (flowBatchOutputBudget) can use the full limit.
     if (requestedProvider === 'copilot') {
-      environmentOverrides.apiKey  = 'copilot-via-gh-cli';
-      environmentOverrides.provider = 'copilot';
+      environmentOverrides.apiKey          = 'copilot-via-gh-cli';
+      environmentOverrides.provider        = 'copilot';
+      environmentOverrides.maxTokensPerCall = 16_384;
+    }
+    // gemini sets an elevated maxTokensPerCall even when selected via EZTEST_AI_PROVIDER
+    if (requestedProvider === 'gemini' && matchingApiKey) {
+      environmentOverrides.maxTokensPerCall = GEMINI_MAX_TOKENS_PER_CALL;
     }
     // If no matching key exists, silently ignore EZTEST_AI_PROVIDER and keep
     // whatever provider/key was detected from the keys that ARE present.
@@ -351,6 +368,8 @@ export function getDefaultModelForProvider(provider: AiProviderName): string {
     github:    GITHUB_FREE_MODEL_ROTATION[0],
     // Copilot API — gpt-4.1 is 0x premium requests and has proven JSON reliability
     copilot:   COPILOT_FREE_MODEL_ROTATION[0],
+    // Gemini — gemini-2.0-flash is the reliable free-tier default; auto-rotates to others on quota
+    gemini:    GEMINI_MODEL_ROTATION[0],
   };
   return modelMap[provider];
 }
@@ -373,4 +392,33 @@ export const COPILOT_FREE_MODEL_ROTATION: readonly string[] = [
   'gpt-5-mini',        // 0x — newer architecture, good fallback
   'gpt-5.4-mini',      // 0.33x — strong quality, low premium cost
   'claude-sonnet-4.6', // 1x — excellent code generation fallback
+] as const;
+
+// ── Google Gemini Model Rotation ──────────────────────────────────────────
+
+/**
+ * Safe default output-token cap for Google Gemini.
+ * Gemini 2.0 Flash and 1.5-series models support 8 192 output tokens;
+ * Gemini 2.5 Pro/Flash support up to 65 536. Using 8 192 ensures the
+ * maxTokensPerCall value is safe across the entire rotation list.
+ */
+export const GEMINI_MAX_TOKENS_PER_CALL = 8_192;
+
+/**
+ * Ordered list of Gemini model IDs for provider rotation.
+ * gemini-2.0-flash is the default: reliable, free-tier friendly, fast.
+ * The rotation includes both flash and pro variants so that if one model's
+ * quota is exhausted the client can fall back to the next in the list.
+ *
+ * Ordering rationale:
+ *   - gemini-2.0-flash first: stable, generous free quota, 8 192 output tokens
+ *   - gemini-2.0-flash-lite: ultrafast lightweight fallback
+ *   - gemini-1.5-pro: large context (2M tokens), excellent reasoning
+ *   - gemini-1.5-flash: broad availability, proven stability
+ */
+export const GEMINI_MODEL_ROTATION: readonly string[] = [
+  'gemini-2.0-flash',       // Free tier: very fast, solid JSON reliability
+  'gemini-2.0-flash-lite',  // Lightest weight, lowest latency
+  'gemini-1.5-pro',         // 2M context, strong code analysis
+  'gemini-1.5-flash',       // Proven stable, wide availability
 ] as const;

@@ -280,6 +280,47 @@ test.describe('uiServer', () => {
     }
   });
 
+  test('POST /api/env saves Gemini key and GET /api/env detects it as gemini provider', async () => {
+    const savedGeminiKey  = process.env['GOOGLE_API_KEY'];
+    const savedAiProvider = process.env['EZTEST_AI_PROVIDER'];
+    const savedGithubToken = process.env['EZTEST_GITHUB_TOKEN'];
+
+    delete process.env['GOOGLE_API_KEY'];
+    delete process.env['EZTEST_AI_PROVIDER'];
+    delete process.env['EZTEST_GITHUB_TOKEN'];
+
+    try {
+      const saveResponse = await fetch(activeServerInstance.serverUrl + '/api/env', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'gemini', apiKey: 'AIza-test-gemini-key' }),
+      });
+
+      const saveResult = await saveResponse.json() as { saved: boolean };
+      expect(saveResponse.status).toBe(200);
+      expect(saveResult.saved).toBe(true);
+      expect(process.env['GOOGLE_API_KEY']).toBe('AIza-test-gemini-key');
+      expect(process.env['EZTEST_AI_PROVIDER']).toBe('gemini');
+
+      const getResponse = await fetch(activeServerInstance.serverUrl + '/api/env');
+      const envStatus = await getResponse.json() as { provider: string | null; providerLabel: string; hasKey: boolean };
+      expect(envStatus.hasKey).toBe(true);
+      expect(envStatus.provider).toBe('gemini');
+      expect(envStatus.providerLabel).toBe('Google Gemini');
+    } finally {
+      if (savedGeminiKey   !== undefined) { process.env['GOOGLE_API_KEY']       = savedGeminiKey;   } else { delete process.env['GOOGLE_API_KEY']; }
+      if (savedAiProvider  !== undefined) { process.env['EZTEST_AI_PROVIDER']   = savedAiProvider;  } else { delete process.env['EZTEST_AI_PROVIDER']; }
+      if (savedGithubToken !== undefined) { process.env['EZTEST_GITHUB_TOKEN']  = savedGithubToken; } else { delete process.env['EZTEST_GITHUB_TOKEN']; }
+      // Clean up .env entries written during this test
+      const envFilePath = join(process.cwd(), '.env');
+      if (existsSync(envFilePath)) {
+        let envContent = readFileSync(envFilePath, 'utf-8');
+        envContent = envContent.replace(/^GOOGLE_API_KEY=AIza-test-gemini-key\r?\n?/m, '');
+        writeFileSync(envFilePath, envContent, 'utf-8');
+      }
+    }
+  });
+
   // ── DELETE /api/env ───────────────────────────────────────────────────────────
 
   test('DELETE /api/env removes the active provider key from process.env', async () => {

@@ -7,13 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
+- **Fix-only mode** — `generate --fix-only-files` re-runs only the specific failing test files instead of regenerating from scratch. The UI automatically passes failing file paths when the "Run & Fix" button is used after a prior test run, dramatically reducing API calls on follow-up fix passes.
+- **Bad-test vs bad-code classification** — Failed tests are now classified before any fix attempt:
+  - *Selector mismatch* (element not found, timeout) → fixed automatically by AI regeneration.
+  - *Behavioral failure* (wrong URL, wrong text content, wrong element state) → flagged as a **suspected application bug**. EZTest preserves the test unchanged and surfaces it with a developer-facing explanation. Rewriting tests to hide real bugs is explicitly prevented.
+- **Concurrent batch processing via `p-limit`** — Flow-mapping AI calls now run concurrently up to a provider-specific limit (OpenAI/Anthropic: 5 concurrent, Gemini: 3, GitHub Models/Copilot: 1 sequential). For a 26-component app on OpenAI this reduces total wall-clock time from ~2 min to ~30 sec.
+- **Zod response validation** — AI JSON responses are now validated against Zod schemas before use. Invalid or truncated responses produce actionable warning logs instead of silent runtime errors downstream.
+- **ariaSnapshot context for test regeneration** — When a test fails and needs AI-powered fixing, EZTest now captures the page's accessibility tree (`page.ariaSnapshot()`) and includes it in the AI prompt. This gives the AI the real element names available on the page, significantly reducing selector guessing and improving first-attempt fix success rates.
+- **Vercel AI SDK** — OpenAI, GitHub Models, Anthropic, and Gemini adapters are now powered by the Vercel AI SDK (`generateText()`). The Copilot Chat API adapter remains custom due to its non-standard OAuth flow. Retry and model-rotation logic is updated to handle both legacy OpenAI SDK error shapes and the new Vercel AI SDK error shapes.
 - **API key management UI** — A new "Manage AI Provider" card on the dashboard lets users initialize, update, or remove their AI provider key directly within the app — no manual `.env` editing required.
-  - **Initialize**: Enter an API key for GitHub Copilot, OpenAI, or Anthropic and save it to `.env` immediately.
+  - **Initialize**: Enter an API key for GitHub Copilot, OpenAI, Anthropic, or Gemini and save it to `.env` immediately.
   - **Update**: Switch providers or rotate a key at any time; the change takes effect in the running process without a restart.
   - **Remove**: One-click key removal with a confirmation prompt; clears both the provider key and `EZTEST_AI_PROVIDER` from `.env` and the running process.
 - `GET /api/env` endpoint — returns the currently active provider name and label (never exposes the key value itself).
 - `DELETE /api/env` endpoint — removes the active provider's credentials from `.env` and the running process.
+- **Log color discipline** — Informational lines now use blue/cyan instead of red. Red is reserved for genuine failures so users correctly interpret color as severity.
+
+### Changed
+- Flow-mapping batch calls are now concurrent (previously sequential) for paid providers, reducing test generation time significantly for large apps.
+- AI response parsing now validates schema structure via Zod in addition to JSON syntax, catching malformed responses earlier with better error messages.
+- Error detection now supports both OpenAI SDK error shapes (`error.status`, `error.headers`) and Vercel AI SDK shapes (`error.statusCode`, `error.responseHeaders`) — retry-after and quota-exhaustion logic works correctly with both.
+- Gemini adapter now uses the native Gemini API (`@ai-sdk/google`) instead of the OpenAI-compatible shim, giving better error messages and reliability.
+
+### Fixed
+- Exit code 1 shown in log output replaced with human-readable failure reason messages throughout all log consumers.
+- Failed test re-run now targets only the failed files (not the entire suite), reducing unnecessary Playwright overhead and API calls.
 
 
 ## [0.1.4] - 2026-04-25

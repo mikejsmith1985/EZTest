@@ -17,15 +17,25 @@ import {
   buildUserFlowGenerationPrompt,
 } from './promptTemplates.js';
 import { logDebug, logWarning } from '../shared/logger.js';
+import pLimit from 'p-limit';
+import {
+  parseFlowsFromAiResponse,
+  parseComponentIntentFromAiResponse,
+} from './aiResponseSchemas.js';
+import type { AiGeneratedFlow, ComponentIntentResponse } from './aiResponseSchemas.js';
 
 // ── Dynamic Batch Sizing ───────────────────────────────────────────────────
 
 /**
- * Target output token budget per batch — 90% of the Copilot Pro 4096-token output cap.
- * Leaving a 10% margin accounts for variation in AI response verbosity.
- * This is the output cap — it applies regardless of which model is active.
+ * Target output token budget per batch — 90% of the model's output cap, leaving
+ * a margin for AI response verbosity. This DEFAULT is for GitHub Models (4 096 tokens).
+ *
+ * The actual value used at runtime is driven by the provider via AiClient.flowBatchOutputBudget:
+ *   - GitHub Models:  ~3 600 tokens → typically 6–8 components per batch
+ *   - Copilot API:   ~14 745 tokens → typically 20–26 components per batch (often 1 call total)
+ *   - OpenAI/Anthropic: scales with their configured maxTokensPerCall
  */
-const TARGET_BATCH_OUTPUT_TOKENS = 3600;
+const DEFAULT_BATCH_OUTPUT_TOKENS = 3600;
 
 /**
  * Fixed token overhead per batch response: JSON array brackets, whitespace,
@@ -55,17 +65,22 @@ export function estimateComponentOutputTokens(componentAnalysis: ComponentAnalys
 
 /**
  * Splits components into batches where each batch's estimated output token cost
- * stays within TARGET_BATCH_OUTPUT_TOKENS (90% of the model's output cap).
+ * stays within the given targetOutputTokens budget.
  *
  * Unlike a fixed batch size, this adapts to component complexity:
  *   - A component with 1 element generates ~3 flow variants ≈ 660 tokens → fits 5 per batch
  *   - A component with 10 elements generates ~15 flow variants ≈ 3300 tokens → 1 per batch
+ *
+ * The budget is provider-specific:
+ *   - GitHub Models (4K output cap):  targetOutputTokens ≈ 3 600  → ~6–8 components/batch
+ *   - Copilot API   (16K output cap): targetOutputTokens ≈ 14 745 → all 26 often fit in 1 batch
  *
  * A component that alone exceeds the budget is placed in its own batch — we cannot
  * split a single component further without losing cross-element flow context.
  */
 export function splitIntoDynamicBatches(
   componentAnalyses: ComponentAnalysis[],
+  targetOutputTokens: number = DEFAULT_BATCH_OUTPUT_TOKENS,
 ): ComponentAnalysis[][] {
   const batches: ComponentAnalysis[][] = [];
   let currentBatch: ComponentAnalysis[] = [];
@@ -77,7 +92,7 @@ export function splitIntoDynamicBatches(
     // Start a new batch if adding this component would exceed the token budget.
     // If the current batch is empty, include it anyway — a single very-complex
     // component cannot be split, and the recovery logic handles any overflow.
-    if (currentBatch.length > 0 && currentBatchTokens + componentTokenCost > TARGET_BATCH_OUTPUT_TOKENS) {
+    if (currentBatch.length > 0 && currentBatchTokens + componentTokenCost > targetOutputTokens) {
       batches.push(currentBatch);
       currentBatch = [];
       currentBatchTokens = BATCH_RESPONSE_OVERHEAD_TOKENS;
@@ -96,34 +111,9 @@ export function splitIntoDynamicBatches(
 
 // ── AI Response Parsing ────────────────────────────────────────────────────
 
-/** The shape of the AI's response to the component intent analysis prompt. */
-interface ComponentIntentResponse {
-  componentPurpose: string;
-  userActions: Array<{
-    actionName: string;
-    description: string;
-    triggerElement: string;
-    expectedOutcome: string;
-    canFail: boolean;
-    failureOutcome?: string;
-  }>;
-  requiredSetup: string;
-}
-
-/** The shape of a single user flow in the AI's flow generation response. */
-interface AiGeneratedFlow {
-  flowName: string;
-  startingRoute: string;
-  flowKind: 'happy-path' | 'error-case' | 'edge-case';
-  steps: Array<{
-    stepDescription: string;
-    targetElementDescription: string;
-    expectedOutcome: string;
-    isNavigation: boolean;
-  }>;
-  involvedComponents: string[];
-  testPriority: 'critical' | 'high' | 'medium';
-}
+// AiGeneratedFlow and ComponentIntentResponse types are imported from aiResponseSchemas.ts.
+// Zod-validated parsing is handled by parseFlowsFromAiResponse and
+// parseComponentIntentFromAiResponse from the same module.
 
 /**
  * Resolves an AI-provided starting route into a usable browser URL.
@@ -151,83 +141,6 @@ function resolveStartingUrl(startingRoute: string, baseUrl: string): string {
   }
 }
 
-/**
- * Attempts to recover a valid JSON array from a response that was cut off mid-stream
- * because the model hit its output token limit. Tries two strategies in order:
- *   1. Truncate at the last `},` boundary (end of last complete array item)
- *   2. Truncate at the last `}` (catches the final item if it wasn't followed by a comma)
- * Returns null if neither strategy produces a parseable array with at least one item.
- */
-function recoverTruncatedJsonArray(truncatedContent: string): unknown[] | null {
-  if (!truncatedContent.trim().startsWith('[')) return null;
-
-  // Strategy 1: find the last complete object ending with `},` and close the array
-  const lastCommaEnd = truncatedContent.lastIndexOf('},');
-  if (lastCommaEnd !== -1) {
-    try {
-      const candidate = truncatedContent.slice(0, lastCommaEnd + 1) + ']';
-      const parsed = JSON.parse(candidate);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {
-      // Fall through to strategy 2
-    }
-  }
-
-  // Strategy 2: find the last `}` — works when the final object was complete but
-  // the closing `]` was never emitted before the token limit was hit
-  const lastBrace = truncatedContent.lastIndexOf('}');
-  if (lastBrace !== -1) {
-    try {
-      const candidate = truncatedContent.slice(0, lastBrace + 1) + ']';
-      const parsed = JSON.parse(candidate);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch {
-      // Truly unrecoverable
-    }
-  }
-
-  return null;
-}
-
-/**
- * Parses a JSON response from the AI, with graceful error handling.
- * Returns null if parsing fails — the caller decides how to handle missing data.
- * For array responses, also attempts truncation recovery when the model hits its
- * output token limit and returns incomplete JSON.
- */
-function parseAiJsonResponse<ParsedType>(
-  aiResponseContent: string,
-  operationDescription: string,
-): ParsedType | null {
-  // Strip any accidental markdown fences the AI might include despite instructions
-  const cleanedContent = aiResponseContent
-    .replace(/^```(?:json)?\s*/m, '')
-    .replace(/\s*```\s*$/m, '')
-    .trim();
-
-  try {
-    return JSON.parse(cleanedContent) as ParsedType;
-  } catch (parseError) {
-    // When the response looks like a truncated JSON array, try to recover whatever
-    // complete items were emitted before the token limit cut the response short.
-    // This preserves partial flow results instead of discarding the entire batch.
-    if (cleanedContent.startsWith('[')) {
-      const recoveredItems = recoverTruncatedJsonArray(cleanedContent);
-      if (recoveredItems && recoveredItems.length > 0) {
-        logWarning(
-          `AI response for "${operationDescription}" was truncated at the token limit. ` +
-          `Recovered ${recoveredItems.length} item(s) from the partial response.`,
-        );
-        return recoveredItems as ParsedType;
-      }
-    }
-
-    logWarning(`Could not parse AI JSON response for "${operationDescription}": ${String(parseError)}`);
-    logDebug(`Raw AI response: ${aiResponseContent.slice(0, 500)}`);
-    return null;
-  }
-}
-
 // ── Component Intent Analysis ──────────────────────────────────────────────
 
 /**
@@ -249,10 +162,7 @@ async function analyzeComponentIntent(
     `component intent: ${componentAnalysis.componentName}`,
   );
 
-  return parseAiJsonResponse<ComponentIntentResponse>(
-    aiResponse.content,
-    `component intent for ${componentAnalysis.componentName}`,
-  );
+  return parseComponentIntentFromAiResponse(aiResponse.content);
 }
 
 // ── User Flow Assembly ─────────────────────────────────────────────────────
@@ -313,8 +223,9 @@ export interface FlowMapperOptions {
  * Maps a set of ComponentAnalysis objects into UserFlow objects by using AI
  * to understand the connections between components and the journeys users take.
  *
- * Components are processed in batches to stay within the GitHub Models API
- * 8K-token-per-request limit. Flows from all batches are merged and returned.
+ * Components are processed in provider-aware batches. The Copilot API's 16 384-token
+ * output cap lets most apps complete flow mapping in a single batch; GitHub Models'
+ * 4 096-token cap requires more, smaller batches. Flows from all batches are merged.
  *
  * This is the bridge between raw code analysis and test generation.
  */
@@ -342,10 +253,11 @@ export async function mapComponentAnalysesToUserFlows(
     }
   }
 
-  // Split components into token-aware batches so no single API call exceeds the
-  // output token cap. Dynamic batching accounts for component complexity — a form
-  // with 10 inputs generates far more flows than a single-button component.
-  const componentBatches = splitIntoDynamicBatches(componentAnalyses);
+  // Split components into provider-aware token batches. The Copilot API supports
+  // 16 384 output tokens vs GitHub Models' 4 096, so the same 26-component app
+  // that needs 22 batches on GitHub Models can fit into 5–6 on Copilot.
+  const batchOutputBudget = aiClient.flowBatchOutputBudget;
+  const componentBatches = splitIntoDynamicBatches(componentAnalyses, batchOutputBudget);
   const totalEstimatedTokens = componentAnalyses.reduce(
     (total, component) => total + estimateComponentOutputTokens(component),
     0,
@@ -357,29 +269,48 @@ export async function mapComponentAnalysesToUserFlows(
 
   const allAiGeneratedFlows: AiGeneratedFlow[] = [];
 
-  for (let batchIndex = 0; batchIndex < componentBatches.length; batchIndex++) {
-    const currentBatch = componentBatches[batchIndex];
-    const batchEstimatedTokens = currentBatch.reduce(
-      (total, component) => total + estimateComponentOutputTokens(component),
-      BATCH_RESPONSE_OVERHEAD_TOKENS,
-    );
-    const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
-    logDebug(
-      `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
-    );
+  // Create a concurrency limiter with the provider's concurrency setting.
+  // GitHub Models and Copilot use limit=1 (sequential) to avoid rate-limit
+  // penalties. OpenAI and Anthropic use limit=5 for real throughput gains.
+  const batchConcurrencyLimit = pLimit(aiClient.concurrencyLimit);
 
-    const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
-    const flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+  const batchPromises = componentBatches.map((currentBatch, batchIndex) =>
+    batchConcurrencyLimit(async () => {
+      const batchEstimatedTokens = currentBatch.reduce(
+        (total, component) => total + estimateComponentOutputTokens(component),
+        BATCH_RESPONSE_OVERHEAD_TOKENS,
+      );
+      const batchLabel = `user flow generation (batch ${batchIndex + 1}/${componentBatches.length})`;
+      logDebug(
+        `  ${batchLabel}: ${currentBatch.length} components, ~${batchEstimatedTokens} estimated output tokens`,
+      );
 
-    const batchFlows = parseAiJsonResponse<AiGeneratedFlow[]>(
-      flowGenerationResponse.content,
-      batchLabel,
-    );
+      const flowGenerationMessages = buildUserFlowGenerationPrompt(currentBatch, targetAppUrl, appSpec, forgeAppContext);
 
+      let flowGenerationResponse;
+      try {
+        flowGenerationResponse = await aiClient.chat(flowGenerationMessages, batchLabel);
+      } catch (batchError) {
+        logWarning(
+          `Batch ${batchIndex + 1}/${componentBatches.length} failed after all retries — skipping. ` +
+          `(${batchError instanceof Error ? batchError.message : String(batchError)})`,
+        );
+        return null;
+      }
+
+      const batchFlows = parseFlowsFromAiResponse(flowGenerationResponse.content, batchLabel);
+      if (!batchFlows) {
+        logWarning(`Batch ${batchIndex + 1} returned no valid flows — skipping.`);
+      }
+      return batchFlows;
+    }),
+  );
+
+  const batchResults = await Promise.all(batchPromises);
+
+  for (const batchFlows of batchResults) {
     if (batchFlows && Array.isArray(batchFlows)) {
       allAiGeneratedFlows.push(...batchFlows);
-    } else {
-      logWarning(`Batch ${batchIndex + 1} returned no valid flows — skipping.`);
     }
   }
 

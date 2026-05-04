@@ -123,8 +123,7 @@ export async function generateAndRunValidationSuite(
     logInfo(`[Validate] Validation suite saved at: ${validationTestFilePath}`);
   } else {
     logWarning(
-      `[Validate] Some validation tests failed (exit code ${testRunResult.exitCode}). ` +
-      `The fix may be incomplete or introduced a regression. ` +
+      `[Validate] Some validation tests still failing — the fix may be incomplete or introduced a regression. ` +
       `Review: ${validationTestFilePath}`,
     );
   }

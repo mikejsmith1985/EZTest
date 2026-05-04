@@ -20,6 +20,7 @@ const COLOR_ACCENT   = '#7c3aed';
 const COLOR_SUCCESS  = '#3fb950';
 const COLOR_ERROR    = '#f85149';
 const COLOR_WARNING  = '#e3b341';
+const COLOR_INFO     = '#79c0ff'; // Blue — clearly informational, not an error or warning
 const COLOR_PRIMARY  = '#e6edf3';
 const COLOR_MUTED    = '#8b949e';
 
@@ -615,7 +616,7 @@ export function buildWizardPageHtml(): string {
       min-height: 320px;
       background: #010409;
     }
-    .log-info    { color: ${COLOR_PRIMARY}; }
+    .log-info    { color: ${COLOR_INFO};    }
     .log-success { color: ${COLOR_SUCCESS}; }
     .log-error   { color: ${COLOR_ERROR};   }
     .log-warning { color: ${COLOR_WARNING}; }
@@ -967,6 +968,7 @@ export function buildWizardPageHtml(): string {
           <option value="github">GitHub Copilot (uses your Copilot subscription)</option>
           <option value="openai">OpenAI (GPT-4o)</option>
           <option value="anthropic">Anthropic (Claude)</option>
+          <option value="gemini">Google Gemini (gemini-2.0-flash)</option>
           <option value="copilot">Copilot via gh CLI (no key needed)</option>
         </select>
 
@@ -1079,6 +1081,13 @@ export function buildWizardPageHtml(): string {
      * Retained so the "Run Tests" button knows which output dir and project root to use.
      */
     var lastGenerateRunConfig = null;
+    /**
+     * Absolute spec file paths that failed in the most recent plain test run.
+     * Populated by parsing "x N tests/path.spec.ts:line:col" lines from Playwright output.
+     * Used by startRunAndFix() to target only the failing files instead of re-running
+     * the full generation pipeline.
+     */
+    var lastRunFailedTestPaths = [];
     /**
      * The project root used for the most recent test run.
      * Passed to /api/open-report so it can locate playwright-report/index.html.
@@ -1846,6 +1855,7 @@ export function buildWizardPageHtml(): string {
       progressTestsWritten = 0;
       progressTestsFailed  = 0;
       lastRunErrorReason   = '';
+      lastRunFailedTestPaths = [];
       if (progressRetryCountdown) {
         clearInterval(progressRetryCountdown);
         progressRetryCountdown = null;
@@ -2025,7 +2035,18 @@ export function buildWizardPageHtml(): string {
       // Maps completions 0→progressTotalTests into the 5%–95% range so the bar moves
       // steadily while tests execute regardless of whether they pass or fail.
       if (progressTotalTests > 0 && /^(ok|x)\\s+\\d+/.test(logMessage)) {
-        if (/^x\\s+\\d+/.test(logMessage)) { progressTestsFailed++; }
+        if (/^x\\s+\\d+/.test(logMessage)) {
+          progressTestsFailed++;
+          // Extract the spec file path from "x N tests\path\to\file.spec.ts:line:col ›"
+          // so Fix Failing Tests can target only the actual failures.
+          var failedPathMatch = logMessage.match(/^x\\s+\\d+\\s+(.+?\\.spec\\.ts):/);
+          if (failedPathMatch) {
+            var extractedPath = failedPathMatch[1].trim();
+            if (lastRunFailedTestPaths.indexOf(extractedPath) === -1) {
+              lastRunFailedTestPaths.push(extractedPath);
+            }
+          }
+        }
         progressTestsWritten = Math.min(progressTestsWritten + 1, progressTotalTests);
         var playwrightPercent = 5 + Math.floor((progressTestsWritten / progressTotalTests) * 90);
         updateRunProgress(playwrightPercent, 'Running tests — ' + progressTestsWritten + ' of ' + progressTotalTests + '…');
@@ -2060,17 +2081,43 @@ export function buildWizardPageHtml(): string {
     }
 
     /**
-     * Re-runs the last generate config with the run-and-fix flag enabled.
-     * EZTest will re-generate the tests, then run each one and use AI to
-     * rewrite any selectors that don't match the live DOM — no manual
-     * terminal command needed.
+     * Fixes only the tests that failed in the most recent test run.
+     *
+     * When a prior test run has recorded failing spec file paths (from the
+     * "x N tests/path.spec.ts" lines), this uses the fix-tests workflow which
+     * skips full re-generation and only runs classify-and-fix on the known failures.
+     *
+     * If no failing paths were recorded (e.g., the user clicked this after a generate
+     * without a separate test run), falls back to the original run-and-fix behavior
+     * which re-generates everything and then runs and fixes selectors.
      */
     function startRunAndFix() {
       if (!lastGenerateRunConfig) { return; }
-      startRun(
-        'Fixing failing tests\u2026',
-        Object.assign({}, lastGenerateRunConfig, { runAndFix: true }),
-      );
+
+      var projectRoot = appConfig ? appConfig.projectPath : null;
+
+      // Use targeted fix-tests workflow when we have specific failing file paths.
+      // This avoids re-analyzing and re-generating tests that already pass.
+      if (lastRunFailedTestPaths.length > 0) {
+        ensureAppUrlBeforeContinuing('Save & Fix Failing Tests', function(configuredAppUrl) {
+          startRun(
+            'Fixing failing tests\u2026',
+            {
+              workflow:         'fix-tests',
+              url:              configuredAppUrl,
+              output:           lastGenerateRunConfig.output,
+              workingDir:       projectRoot || lastGenerateRunConfig.workingDir,
+              failedTestFiles:  lastRunFailedTestPaths.slice(), // copy so reset doesn't affect in-flight run
+            },
+          );
+        });
+      } else {
+        // No recorded failing paths — fall back to full run-and-fix from last generate config
+        startRun(
+          'Fixing failing tests\u2026',
+          Object.assign({}, lastGenerateRunConfig, { runAndFix: true }),
+        );
+      }
     }
 
     /**
