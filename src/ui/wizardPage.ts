@@ -1991,6 +1991,26 @@ export function buildWizardPageHtml(): string {
           progressRetryCountdown = null;
         }
         updateRunProgress(100, '✅ Done!');
+        return;
+      }
+
+      // ── Playwright test-runner output (run-tests workflow) ─────────────────
+      // "Running N tests using N workers" — grab the total so we can show per-test progress.
+      var playwrightTotalMatch = logMessage.match(/Running (\\d+) tests/);
+      if (playwrightTotalMatch) {
+        progressTotalTests   = parseInt(playwrightTotalMatch[1], 10);
+        progressTestsWritten = 0;
+        updateRunProgress(5, 'Running ' + progressTotalTests + ' tests…');
+        return;
+      }
+
+      // "ok N tests\..." or "x N tests\..." — each completed test result (pass or fail).
+      // Maps completions 0→progressTotalTests into the 5%–95% range so the bar moves
+      // steadily while tests execute regardless of whether they pass or fail.
+      if (progressTotalTests > 0 && /^(ok|x)\\s+\\d+/.test(logMessage)) {
+        progressTestsWritten = Math.min(progressTestsWritten + 1, progressTotalTests);
+        var playwrightPercent = 5 + Math.floor((progressTestsWritten / progressTotalTests) * 90);
+        updateRunProgress(playwrightPercent, 'Running tests — ' + progressTestsWritten + ' of ' + progressTotalTests + '…');
       }
     }
 
@@ -2082,8 +2102,9 @@ export function buildWizardPageHtml(): string {
         doneMsg.className   = 'run-result-warning';
         doneMsg.textContent = 'Cancelled';
       } else {
+        updateRunProgress(100, '❌ Finished with errors');
         doneMsg.className   = 'run-result-failure';
-        doneMsg.textContent = '\u274C Finished with errors (exit code ' + data.exitCode + ')';
+        doneMsg.textContent = '❌ Finished with errors (exit code ' + data.exitCode + ')';
         // Even on failure, offer report — partial results are still useful
         if (currentRunConfig && currentRunConfig.workflow === 'run-tests') {
           lastTestRunWorkingDir = currentRunConfig.workingDir || null;

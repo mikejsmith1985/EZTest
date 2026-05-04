@@ -424,6 +424,16 @@ function buildCliArgsForWorkflow(runConfig: RunConfig): string[] {
 // ── Process spawning helpers ───────────────────────────────────────────────
 
 /**
+ * Removes ANSI terminal escape sequences from a string.
+ * Playwright (and other CLI tools) embed color codes in their output.
+ * Those codes appear as raw garbage when rendered as plain text in the browser,
+ * so we strip them here before forwarding to the socket.
+ */
+function stripAnsiCodes(text: string): string {
+  return text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+}
+
+/**
  * Spawns a child process and streams its stdout/stderr line-by-line to the
  * connected browser socket as `run:log` events. Emits `run:done` when the
  * process exits. Extracted so both EZTest CLI runs and `playwright test` runs
@@ -454,7 +464,7 @@ function spawnAndStreamProcess(
   childProcess.stdout?.on('data', (dataChunk: Buffer) => {
     const outputText = dataChunk.toString();
     for (const outputLine of outputText.split('\n')) {
-      const trimmedLine = outputLine.trimEnd();
+      const trimmedLine = stripAnsiCodes(outputLine.trimEnd());
       if (trimmedLine.length === 0) { continue; }
       const logLevel = detectLogLevel(trimmedLine);
       clientSocket.emit('run:log', { level: logLevel, message: trimmedLine });
@@ -464,7 +474,7 @@ function spawnAndStreamProcess(
   childProcess.stderr?.on('data', (dataChunk: Buffer) => {
     const outputText = dataChunk.toString();
     for (const outputLine of outputText.split('\n')) {
-      const trimmedLine = outputLine.trimEnd();
+      const trimmedLine = stripAnsiCodes(outputLine.trimEnd());
       if (trimmedLine.length === 0) { continue; }
       clientSocket.emit('run:log', { level: 'error' as LogLevel, message: trimmedLine });
     }
